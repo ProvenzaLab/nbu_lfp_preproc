@@ -13,16 +13,22 @@ import glob
 from utils.config import FS, LAB_WORLDS
 from utils.plotting_utils import plot_hourly_psd, plot_lfp_spectrogram
 
-def plot_visit_details(df, chs, mode):
+def plot_visit_details(df, chs, mode, root):
 
     rows = len(chs)
     nperseg = 1000
 
     sp_fig, sp_axs = plt.subplots(rows, 1, figsize=(12, 7*rows), sharex=True)
 
-    for ch, ax in zip(chs, sp_axs):
-        ax = plot_lfp_spectrogram(df, ch, fs=FS, nperseg=nperseg, max_freq=30, ax=ax)
-        ax.set_title(f'{ch} Spectrogram')
+    if rows > 1:
+        for ch, ax in zip(chs, sp_axs):
+            ax = plot_lfp_spectrogram(df, ch, fs=FS, nperseg=nperseg, max_freq=30, ax=ax)
+            ax.set_title(f'{ch} Spectrogram') 
+    else:
+        ch = chs[0]
+        sp_axs = plot_lfp_spectrogram(df, ch, fs=FS, nperseg=nperseg, max_freq=30, ax=sp_axs)
+        sp_axs.set_title(f'{ch} Spectrogram')  
+    
     sp_fig.suptitle(f'{mode} Spectrograms')
 
     psd_figs = []
@@ -30,11 +36,19 @@ def plot_visit_details(df, chs, mode):
         psd_fig, axes, results = plot_hourly_psd(df, ch, fs=FS, nperseg=nperseg, mode=mode)
         psd_fig.suptitle(f'{mode} Hourly PSDs - {ch}', x=0.5, y=1.05)
         psd_figs.append(psd_fig)
-    
-    return [sp_fig, *psd_figs]
+        plt.close() 
 
-def main(root):
-    all_figs = []
+    with PdfPages(os.path.join(root, f'{mode}/{mode}_preproc_analysis.pdf')) as pdf:
+        for fig in [sp_fig, *psd_figs]:
+            fig.tight_layout()
+            pdf.savefig(fig)
+            
+        pdf.close()
+      
+    return 
+
+def main(root, overwrite=False):
+
     for mode in ['raw', 'perceive', 'template']:
 
         try:
@@ -44,30 +58,16 @@ def main(root):
             print(f'Error loading lfp data for {mode}')
             continue
 
+        if os.path.exists(f'{root}/{mode}/{mode}_preproc_analysis.pdf') and not overwrite:
+            print('Preprocessing plots already created')
+            continue
+
         chs = [col for col in df.columns if 'LEFT' in col or 'RIGHT' in col]
 
-        """ for ch in chs:
+        df.dropna(subset=chs, how='all', axis=0, inplace=True)
+        df.drop_duplicates(subset='CT_times', inplace=True)
 
-            # Remove large artifacts (mostly toggles, > 5 z-score)
-            clean_lfp = zscore(df[ch].values, nan_policy='omit')
-            peak_dist = FS * 5 
-            peaks, peak_attr = find_peaks(abs(clean_lfp), height=5, distance=peak_dist)
-
-            for peak in peaks:
-                start = peak - peak_dist if peak <= peak_dist else 0
-                end = peak + peak_dist if peak + peak_dist <= len(clean_lfp) else len(clean_lfp)
-
-                df.iloc[start:end, df.columns.get_loc(ch)] = np.nan """
-
-        figs = plot_visit_details(df, chs, mode)
-        all_figs.extend(figs)
-
-    with PdfPages(os.path.join(root, 'visit_preproc_analysis.pdf')) as pdf:
-        for fig in all_figs:
-            fig.tight_layout()
-            pdf.savefig(fig)
-        
-        pdf.close()
+        plot_visit_details(df, chs, mode, root)
 
     return
 
@@ -76,4 +76,4 @@ if __name__ == '__main__':
 
     for root in visits:
         print(f'Processing visit: {root}')
-        main(os.path.join(root, 'rawlfp'))
+        main(os.path.join(root, 'rawlfp'), overwrite=True)

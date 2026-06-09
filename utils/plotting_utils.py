@@ -8,8 +8,7 @@ from scipy.signal import welch, spectrogram, butter, sosfilt
 from utils.utils import find_non_nan_segments
 
 def plot_hourly_psd(df: pd.DataFrame, data_col: str, fs: float = 1.0,
-                   nperseg: int = None, freq_range: tuple = None,
-                   mode: str = 'raw',
+                   nperseg: int = None, mode: str = 'raw',
                    **welch_kwargs):
     """
     Compute and plot the Power Spectral Density (PSD) for each hour of data
@@ -75,7 +74,7 @@ def plot_hourly_psd(df: pd.DataFrame, data_col: str, fs: float = 1.0,
             freqs, psd = freqs[mask], psd[mask]
 
             results[hour] = (freqs, psd)
-            ax = axes[i, j]
+            ax = axes[i, j] if len(grouped) > 1 else axes[j]
             ax.semilogy(freqs, psd, label=str(hour), linewidth=1.5)
             ax.set_xlabel("Frequency (Hz)", fontsize=12)
             ax.set_ylabel("Power Spectral Density", fontsize=12)
@@ -83,9 +82,9 @@ def plot_hourly_psd(df: pd.DataFrame, data_col: str, fs: float = 1.0,
             ax.grid(True, which="both", linestyle="--", linewidth=0.5, alpha=0.6)
 
         # Plot random 10 sec chunk of data
-        ax = axes[i, 2]
+        ax = axes[i, 2] if len(grouped) > 1 else axes[2]
         if len(signal) > fs * 10:
-            start_idx = fs * 600
+            start_idx = fs * 600 if len(group) > fs * 1200 else fs * 10
             time_chunk = group["CT_times"].iloc[start_idx:start_idx + fs * 10]
             signal_chunk = signal[start_idx:start_idx + fs * 10]
 
@@ -97,7 +96,7 @@ def plot_hourly_psd(df: pd.DataFrame, data_col: str, fs: float = 1.0,
             ax.set_xlabel("Time", fontsize=12)
             ax.set_ylabel("Signal", fontsize=12)
             ax.set_title(f"{mode} plots - {data_col}", fontsize=14)
-            ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S', tz='America/Chicago'))
+            ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d %I:%M %p', tz='America/Chicago'))
 
     fig.tight_layout()
 

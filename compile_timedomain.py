@@ -13,18 +13,20 @@ import pandas as pd
 import numpy as np
 from percept_parser.percept import PerceptParser
 from percept_parser import plotter
+from utils.utils import correct_time_drift
 from utils.config import STUDY_IDS, TZ, DATALAKE, LAB_WORLDS, extract_consecutive_days
 
-def read_lfp_data(pt, window=None, plot=False, ecg_method=None):
+def read_lfp_data(pt, window=None, plot=False, ecg_method=None, save=True):
     if pt[:-3] not in STUDY_IDS.keys() or pt[-3:] == '000' or window is None:
         return
     
     # Make project worlds save directory
     study_id = STUDY_IDS[pt[:-3]]
 
-    ecg_label = ecg_method if ecg_method else 'raw'
-    target_folder = LAB_WORLDS / 'Provenza' / 'NBUPipeline' / pt / window[0] / 'rawlfp' / ecg_label
-    os.makedirs(target_folder, exist_ok=True)
+    if save:
+        ecg_label = ecg_method if ecg_method else 'raw'
+        target_folder = LAB_WORLDS / 'Provenza' / 'NBUPipeline' / pt / window[0] / 'rawlfp' / ecg_label
+        os.makedirs(target_folder, exist_ok=True)
 
     # Gather all pt LFP files that have been uploaded
     lfp_path = DATALAKE / study_id / pt / 'LFP'
@@ -60,7 +62,7 @@ def read_lfp_data(pt, window=None, plot=False, ecg_method=None):
 
             if len(data) != 0:
                 df = pd.concat(data)
-                df['filename'] = filename
+                df['filename'] = filename.split(os.sep)[-1]
                 chunks.append(df)
 
                 if plot:
@@ -83,19 +85,28 @@ def read_lfp_data(pt, window=None, plot=False, ecg_method=None):
     # Convert timestamps to Central + create CT times column
     pt_df['CT_times'] = pt_df.index.to_series().dt.tz_convert('America/Chicago')
 
+    # Manually adjust times for files with abnormal tablet end times
+    if pt == 'TRBD001' or pt == 'TRBD002':
+        drift_df = pd.read_csv('utils/NBU_TRBD0012_time_correction.csv', delimiter=';')
+        drift_df['filename'] = drift_df['filename'].apply(lambda f: f.split(os.sep)[-1])
+        drift_df.query('pt_id == @pt and filename.isin(@pt_df.filename)', inplace=True)
+        pt_df = correct_time_drift(pt_df, drift_df[drift_df['tablet_end_time'].isna()])
+
     # Create columns for other info
     pt_df['lead_location'] = parser.lead_location
     pt_df['lead_model'] = parser.lead_model
     pt_df['ipg_hemisphere'] = filename.split(os.sep)[-2]
     
-    target_fp = target_folder / f'{pt}_{start.strftime("%Y-%m-%d")}-{end.strftime("%Y-%m-%d")}_timedomain_LFP.parq'
-    pt_df.to_parquet(target_fp)
+    if save:
+        target_fp = target_folder / f'{pt}_{start.strftime("%Y-%m-%d")}-{end.strftime("%Y-%m-%d")}_timedomain_LFP.parq'
+        pt_df.to_parquet(target_fp)
+    else:
+        return pt_df
     return
 
 
 if __name__ == '__main__':
     # Compiles LFP data from each NBU visit
-    # TODO: skip nbu visits that have already been preprocessed
 
     pt_paths = sum([glob.glob(os.path.join(DATALAKE / study_id, "*/")) for study_id in STUDY_IDS.values()], [])
 
@@ -109,4 +120,7 @@ if __name__ == '__main__':
                 print(f'Processing {pt} NBU visit from {nbu_visit[0]} to {nbu_visit[1]}')
                 for method in [None, 'template', 'perceive']:
                     print(f'ECG method: {method}')
+                    """ if os.path.exists(LAB_WORLDS / 'Provenza' / 'NBUPipeline' / pt / nbu_visit[0] / 'rawlfp' / method if method else 'raw' / f'{pt}_{nbu_visit[0]}-{nbu_visit[1]}_timedomain_LFP.parq'):
+                        print('Already processed')
+                        continue """
                     read_lfp_data(pt, window=nbu_visit, plot=False, ecg_method=method)
