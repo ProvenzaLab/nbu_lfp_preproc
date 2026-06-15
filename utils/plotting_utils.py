@@ -96,7 +96,7 @@ def plot_hourly_psd(df: pd.DataFrame, data_col: str, fs: float = 1.0,
             ax.set_xlabel("Time", fontsize=12)
             ax.set_ylabel("Signal", fontsize=12)
             ax.set_title(f"{mode} plots - {data_col}", fontsize=14)
-            ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d %I:%M %p', tz='America/Chicago'))
+            ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S %p', tz='America/Chicago'))
 
     fig.tight_layout()
 
@@ -135,6 +135,6 @@ def plot_lfp_spectrogram(lfp_df, ch, fs, nperseg, max_freq, ax):
     ax.set_title(f'LFP [{ch}]')
     ax.set_ylabel('Frequency (Hz)')
     ax.set_xlim(lfp_df['CT_times'].min(), lfp_df['CT_times'].max())
-    ax.xaxis.set_major_formatter(mdates.DateFormatter('%I:%M %p', tz='America/Chicago'))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d %I:%M %p', tz='America/Chicago'))
 
     return ax

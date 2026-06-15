@@ -34,6 +34,8 @@ def read_lfp_data(pt, window=None, plot=False, ecg_method=None, save=True):
     
     # Run percept parser on the LFP files to create a single dataframe
     chunks = []
+    files_ = []
+
     for filename in paths:
         try:
             parser = PerceptParser(filename, ecg_method=ecg_method)
@@ -44,7 +46,7 @@ def read_lfp_data(pt, window=None, plot=False, ecg_method=None, save=True):
 
         # Check if session was within specified date window
         if window:
-            session_start = parser.js['SessionDate']
+            session_start = parser.js['SessionDate'] # Tablet start time
             session_tz = parser.js['ProgrammerUtcOffset']
 
             start = parse(window[0]).replace(tzinfo=TZ)
@@ -56,6 +58,16 @@ def read_lfp_data(pt, window=None, plot=False, ecg_method=None, save=True):
 
             if session_ts < start or session_ts > end:
                 continue
+        
+        # Check if file is a duplicate
+        ipg_start = parser.js['DeviceInformation']['Initial']['DeviceDateTime']
+        ipg_serial = parser.js['DeviceInformation']['Initial']['NeurostimulatorSerialNumber']
+
+        file_meta = (session_start, ipg_start, ipg_serial)
+        if file_meta in files_:
+            continue # Skip file with duplicate tablet, ipg start times
+        else:
+            files_.append(file_meta)
 
         for id in [True, False]:
             data = parser.read_timedomain_data(indefinite_streaming=id)
@@ -82,15 +94,18 @@ def read_lfp_data(pt, window=None, plot=False, ecg_method=None, save=True):
     
     pt_df = pd.concat(chunks)
 
+    # Drop duplicate rows with nan LFP values
+    chs = [ch for ch in pt_df.columns if 'LEFT' in ch or 'RIGHT' in ch]
+    pt_df = pt_df[~(pt_df.index.duplicated(keep=False) & pt_df[chs].isna().all(axis=1))]
+
     # Convert timestamps to Central + create CT times column
     pt_df['CT_times'] = pt_df.index.to_series().dt.tz_convert('America/Chicago')
-
+    
     # Manually adjust times for files with abnormal tablet end times
-    if pt == 'TRBD001' or pt == 'TRBD002':
-        drift_df = pd.read_csv('utils/NBU_TRBD0012_time_correction.csv', delimiter=';')
-        drift_df['filename'] = drift_df['filename'].apply(lambda f: f.split(os.sep)[-1])
-        drift_df.query('pt_id == @pt and filename.isin(@pt_df.filename)', inplace=True)
-        pt_df = correct_time_drift(pt_df, drift_df[drift_df['tablet_end_time'].isna()])
+    drift_df = pd.read_csv('utils/time_drift_per_file_final.csv', delimiter=';')
+    drift_df['filename'] = drift_df['filename'].apply(lambda f: f.split(os.sep)[-1])
+    drift_df.query('pt_id == @pt and filename.isin(@pt_df.filename)', inplace=True)
+    pt_df = correct_time_drift(pt_df, drift_df[drift_df['tablet_end_time'].isna()])
 
     # Create columns for other info
     pt_df['lead_location'] = parser.lead_location

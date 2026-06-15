@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 
 DATALAKE = Path('Z:')
 LAB_WORLDS = Path('Y:')
-STUDY_IDS =  {'TRBD': 'TRBD-53761'} #{'P': 'PerceptOCD-48392', 'AA': 'AA-56119', 'TRBD': 'TRBD-53761'}
+STUDY_IDS =  {'P': 'PerceptOCD-48392', 'AA': 'AA-56119', 'TRBD': 'TRBD-53761'}
 TZ = ZoneInfo("America/Chicago")
 FS = 250
 
