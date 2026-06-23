@@ -4,3 +4,9 @@ plots/
 *.bat
 *.csv
 *.png
+nbu_concat_single_channel/*
+nbu_concat/*
+*.pkl
+*.pdf
+*.out
+*.log

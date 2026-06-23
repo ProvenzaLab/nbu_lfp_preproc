@@ -57,6 +57,7 @@ def compute_fooof_decomposition(df_spec, freqs, fit_range=(1, 100), integer_hz=T
 
     aperiodic_features = []
     periodic_only_spectra = []
+    aperiodic_only_spectra = []
     original_spectra = []
     
 
@@ -68,6 +69,7 @@ def compute_fooof_decomposition(df_spec, freqs, fit_range=(1, 100), integer_hz=T
         if valid_idx.sum() < 3:
             aperiodic_features.append((np.nan, np.nan))
             periodic_only_spectra.append(np.full(fit_freqs.shape, np.nan, dtype=float))
+            aperiodic_only_spectra.append(np.full(fit_freqs.shape, np.nan, dtype=float))
             original_spectra.append(np.full(fit_freqs.shape, np.nan, dtype=float))
             continue
 
@@ -83,21 +85,24 @@ def compute_fooof_decomposition(df_spec, freqs, fit_range=(1, 100), integer_hz=T
 
             periodic_spectrum = np.full(fit_freqs.shape, np.nan, dtype=float)
             periodic_spectrum[valid_idx] = fm.results._model.data.power_spectrum - fm.results.model._ap_fit
+            aperiodic_only_spectra.append(fm.results.model._ap_fit)
             periodic_only_spectra.append(periodic_spectrum)
             original_spectra.append(psd_slice)
         except Exception:
             aperiodic_features.append((np.nan, np.nan))
+            aperiodic_only_spectra.append(np.full(fit_freqs.shape, np.nan, dtype=float))
             periodic_only_spectra.append(np.full(fit_freqs.shape, np.nan, dtype=float))
             original_spectra.append(np.full(fit_freqs.shape, np.nan, dtype=float))
 
-    df_aperiodic = pd.DataFrame(
+    df_aperiodic_params = pd.DataFrame(
         aperiodic_features,
         index=df_spec.index,
         columns=["offset", "exponent"],
     )
     df_periodic = pd.DataFrame(periodic_only_spectra, index=df_spec.index, columns=fit_freqs)
+    df_aperiodic = pd.DataFrame(aperiodic_only_spectra, index=df_spec.index, columns=fit_freqs)
     df_spec_original = pd.DataFrame(original_spectra, index=df_spec.index, columns=fit_freqs)
-    return df_aperiodic, df_periodic, df_spec_original
+    return df_aperiodic_params, df_aperiodic, df_periodic, df_spec_original
 
 def compute_bandpower(df_periodic, df_aperiodic, bands):
     df_bandpower = pd.DataFrame(index=df_periodic.index)
@@ -132,9 +137,9 @@ def add_active_sensing_band(df_bandpower, df_spec, center_freq, half_bandwidth):
     df_bandpower["active_sensing_band"] = sensing_values
     return df_bandpower
 
-def get_files_and_channels():
+def get_files_and_channels(folder_="perceive"):
 
-    path_check = "NBU_file_path_date_mapping.csv"
+    path_check = f"NBU_file_path_date_mapping_{folder_}.csv"
     if os.path.exists(path_check):
         df_chs = pd.read_csv(path_check)
         return df_chs
@@ -148,7 +153,9 @@ def get_files_and_channels():
         dates_ = [d for d in dates_ if os.path.isdir(os.path.join(PATH_, d))]
 
         for date in dates_:
-            path_read = os.path.join(PATH_, date, "rawlfp", "raw")
+            path_read = os.path.join(PATH_, date, "rawlfp", folder_)
+            if not os.path.exists(path_read):
+                continue
 
             files_parq = os.listdir(path_read)
             if len(files_parq) == 0:
@@ -164,23 +171,23 @@ def get_files_and_channels():
                     "date": date,
                 })
     df_chs = pd.DataFrame(l_chs_)
-    df_chs.to_csv("NBU_file_path_date_mapping.csv", index=False)
+    df_chs.to_csv(f"NBU_file_path_date_mapping_{folder_}.csv", index=False)
     return df_chs
     
 
 def run_pipeline(NBU_LFP_PATH, NBU_CHANNEL):
     ts, df_nbu = load_nbu_signal(NBU_LFP_PATH, NBU_CHANNEL)
-    df_spec, freqs = compute_psd_windows(ts, df_nbu.index, fs=250, window_seconds=10)
+    df_spec, freqs = compute_psd_windows(ts, df_nbu.index, fs=250, window_seconds=10, only_int_frequencies=False)
     #df_spec_1min = resample_spectrogram(df_spec, rule="1min")
 
-    df_aperiodic, df_periodic, df_spec_original = compute_fooof_decomposition(
+    df_aperiodic_params, df_aperiodic, df_periodic, df_spec_original = compute_fooof_decomposition(
                 df_spec,
                 freqs,
                 fit_range=(1, 100),
-                integer_hz=True,
+                integer_hz=False,
             )
 
-    df_features = compute_bandpower(df_periodic, df_aperiodic, BANDS)
+    df_features = compute_bandpower(df_periodic, df_aperiodic_params, BANDS)
     df_features = add_active_sensing_band(
                 df_features,
                 df_spec,
@@ -191,11 +198,14 @@ def run_pipeline(NBU_LFP_PATH, NBU_CHANNEL):
     d_save = {
         "df_spec": df_spec,
         "df_features": df_features,
+        "df_aperiodic_params": df_aperiodic_params,
+        "df_aperiodic_spectra": df_aperiodic,
         "df_periodic_ap_removed": df_periodic,
+        "freqs": freqs
     }
     # save in same directory as input file
     save_dir = os.path.dirname(NBU_LFP_PATH)
-    save_path = os.path.join(save_dir, f"spectra_fooof_bandpower_{NBU_CHANNEL}.pkl")
+    save_path = os.path.join(save_dir, f"spectra_highres_fooof_bandpower_{NBU_CHANNEL}.pkl")
 
     with open(save_path, "wb") as f:
         pickle.dump(d_save, f)
@@ -204,17 +214,24 @@ def run_pipeline(NBU_LFP_PATH, NBU_CHANNEL):
 
 if __name__ == "__main__":
 
-    l_ = get_files_and_channels()
+    l_ = get_files_and_channels("raw") # "perceive", "template"
 
     # for idx, row in l_.iterrows():
     #     NBU_LFP_PATH = row["path"]
     #     NBU_CHANNEL = row["channel"]
     #     run_pipeline(NBU_LFP_PATH, NBU_CHANNEL)
 
-    Parallel(n_jobs=20)(
+    Parallel(n_jobs=-1)(
         delayed(run_pipeline)(row["path"], row["channel"])
         for idx, row in l_.iterrows()
     )
 
-    print("Pipeline completed.")
-    
+    # l_ = get_files_and_channels("raw")
+
+    # Parallel(n_jobs=-1)(
+    #     delayed(run_pipeline)(row["path"], row["channxel"])
+    #     for idx, row in l_.iterrows()
+    # )
+
+    # write nohup output to a file
+    # nohup python compute_spectra_fooof_bandpower.py & > nohup_output.log 2>&1 &

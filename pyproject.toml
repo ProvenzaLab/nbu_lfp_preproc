@@ -8,7 +8,9 @@ dependencies = [
     "joblib>=1.5.3",
     "pandas>=3.0.3",
     "perceptparser",
+    "pillow>=12.2.0",
     "pyarrow>=24.0.0",
+    "pytz>=2026.2",
     "seaborn>=0.13.2",
     "specparam>=2.0.0rc7",
 ]
