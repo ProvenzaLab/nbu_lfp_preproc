@@ -670,7 +670,7 @@ if plot_payloads:
                 ax_active.set_ylabel("")
                 ax_sleep.set_ylabel("")
 
-            for row_idx, ax in enumerate((ax_spec, ax_active, ax_sleep)):
+            for row_idx, ax in enumerate((ax_active, ax_sleep)):
                 ax.set_xlim(x_start, x_end)
                 ax.xaxis.set_major_locator(mdates.MinuteLocator(byminute=[0, 30], tz=LOCAL_TZ))
                 ax.xaxis.set_major_formatter(
@@ -691,7 +691,7 @@ if plot_payloads:
         fig.tight_layout(rect=[0, 0, 1, 0.96])
         side_slug = re.sub(r"[^A-Za-z0-9_-]+", "_", str(side))
         #fig.savefig(output_dir / f"all_visits_side_by_side_{side_slug}_daytime_only_fullspec.png", dpi=200)
-        plt.close(fig)
+        #plt.close(fig)
 
 
 corr_out = pd.DataFrame(all_corr_records)

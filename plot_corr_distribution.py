@@ -9,10 +9,17 @@ import pandas as pd
 import seaborn as sns
 
 
-INPUT_PATH = Path("out_figures_concat_single_channel/corr_10min_segments.pkl")
-OUTPUT_DIR = Path("out_figures_concat_single_channel")
-OUTPUT_FIG = OUTPUT_DIR / "corr_distribution_outside_sleep.png"
+INPUT_PATH = Path("out_figures_concat_single_channel_tight_TRBD001/corr_10min_segments.pkl")
+OUTPUT_DIR = Path("out_figures_concat_single_channel_tight_TRBD001")
+
 OUTPUT_PVALS = OUTPUT_DIR / "corr_distribution_permutation_pvalues.csv"
+
+DAYTIME = False
+if DAYTIME:
+    OUTPUT_FIG = OUTPUT_DIR / "corr_distribution_daytime.png"
+else:
+    OUTPUT_FIG = OUTPUT_DIR / "corr_distribution_nighttime.png"
+
 N_PERMUTATIONS = 10000
 RANDOM_SEED = 42
 TARGET_PAIRS = [
@@ -20,12 +27,16 @@ TARGET_PAIRS = [
     "active_sensing_band_log__theta",
     "active_sensing_band_log__alpha",
     "active_sensing_band_log__oura_met",
+    "active_sensing_band_log__audio_word_duration",
+    "active_sensing_band_log__audio_word_count",
 ]
 PAIR_LABELS = {
     "active_sensing_band_log__offset": "active sensing band vs offset",
     "active_sensing_band_log__theta": "active sensing band vs theta",
     "active_sensing_band_log__alpha": "active sensing band vs alpha",
     "active_sensing_band_log__oura_met": "active sensing band vs met",
+    "active_sensing_band_log__audio_word_duration": "active sensing band vs audio word duration",
+    "active_sensing_band_log__audio_word_count": "active sensing band vs audio word count",
 }
 
 
@@ -167,7 +178,10 @@ def main() -> None:
 
     df = df.copy()
     df["visit_start_date"] = pd.to_datetime(df["visit_start_date"])
-    df = df[~df["sleep_present"].astype(bool)].copy()
+    if DAYTIME:
+        df = df[~df["sleep_present"].astype(bool)].copy()
+    else:
+        df = df[df["sleep_present"].astype(bool)].copy()
     df = df[df["pair"].isin(TARGET_PAIRS)].copy()
     df = df[np.isfinite(df["correlation"].to_numpy(dtype=float))]
 

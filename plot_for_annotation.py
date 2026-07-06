@@ -8,15 +8,32 @@ from matplotlib import pyplot as plt
 from pathlib import Path
 from pickle import load
 
+# set Arial font for all plots and fontisize to 10
+plt.rcParams['font.family'] = 'Arial'
+plt.rcParams['font.size'] = 10
 
 LOCAL_TZ = "America/Chicago"
-SPECTRUM_VMIN = -13
-SPECTRUM_VMAX = 3
+SPECTRUM_VMIN = -5.5
+SPECTRUM_VMAX = 1
 FALLBACK_SLEEP_START_HOUR = 20
 FALLBACK_SLEEP_END_HOUR = 8
 
+patient = "TRBD001"
+
+if patient == "TRBD001":
+    PLOT_SLEEP = True
+    df_audio = pd.read_csv("/scratch/timonmerk/nbu-audiovisual-pipeline/audio/df_speaker_all_NBU_visits.csv")
+    df_audio["time"] = pd.to_datetime(df_audio["time"], utc=True).dt.tz_convert(LOCAL_TZ)
+    # based on the time group by 10s intervals, and average the word duration, but count the number of words (collumn word_count)
+    # set time as index and sort the index
+    df_audio = df_audio.set_index("time").sort_index()
+
+    df_audio_grouped = df_audio.groupby(pd.Grouper(freq="10s")).agg({"word_duration": "mean", "word_count": "sum"})
+else:
+    PLOT_SLEEP = False
+
 VISIT_FILE_RE = re.compile(
-    r"^spectra_fooof_bandpower_(?P<channel>.+?)_visit(?P<visit>\d+)_(?P<start>\d{4}-\d{2}-\d{2})_to_(?P<end>\d{4}-\d{2}-\d{2})$"
+    r"^spectra_highres_fooof_bandpower_(?P<channel>.+?)_visit(?P<visit>\d+)_(?P<start>\d{4}-\d{2}-\d{2})_to_(?P<end>\d{4}-\d{2}-\d{2})$"
 )
 
 
@@ -149,7 +166,7 @@ def _compute_segment_correlations(
     visit_meta,
     sleep_rule,
 ):
-    value_cols = ["active_sensing_band_log", "offset", "theta", "alpha", "oura_met"]
+    value_cols = ["active_sensing_band_log", "offset", "theta", "alpha", "oura_met", "audio_word_duration", "audio_word_count"]
     pair_cols = [(value_cols[i], value_cols[j]) for i in range(len(value_cols)) for j in range(i + 1, len(value_cols))]
 
     segment_records = []
@@ -210,9 +227,10 @@ def _plot_measure(
         ax.text(0.5, 0.5, "No data", transform=ax.transAxes, ha="center", va="center")
         return
 
-    if sleep_intervals:
-        for sleep_start_ts, sleep_end_ts in sleep_intervals:
-            ax.axvspan(sleep_start_ts, sleep_end_ts, color="green", alpha=0.2)
+    if PLOT_SLEEP:
+        if sleep_intervals:
+            for sleep_start_ts, sleep_end_ts in sleep_intervals:
+                ax.axvspan(sleep_start_ts, sleep_end_ts, color="green", alpha=0.2)
 
     resampled = series.resample("10min")
     avg_10min = resampled.mean().dropna()
@@ -356,19 +374,25 @@ def get_oura_scores(oura_scores, date_first, date_last, subject):
 
 
 oura = pd.read_pickle("oura_scores.pkl")
+if patient == "TRBD001":
+    base_dir = Path("nbu_concat_single_channel")
+    output_dir = Path("out_figures_concat_single_channel_tight_TRBD001")
+else:
+    base_dir = Path("nbu_concat_single_channel_TRBD002")
+    output_dir = Path("out_figures_concat_single_channel_tight_TRBD002")
 
-base_dir = Path("nbu_concat_single_channel")
-pkl_files = sorted(base_dir.glob("spectra_fooof_bandpower_*.pkl"))
+pkl_files = sorted(base_dir.glob("spectra_highres_fooof_bandpower_*.pkl"))
 
-output_dir = Path("out_figures_concat_single_channel_tight")
+
 output_dir.mkdir(parents=True, exist_ok=True)
 
-path_sleep_times_TRBD001 = "trbd001_nbu_sleep_onset.pkl"
-with open(path_sleep_times_TRBD001, "rb") as f:
-    sleep_times_TRBD001 = load(f)
+if PLOT_SLEEP:
+    path_sleep_times_TRBD001 = "trbd001_nbu_sleep_onset.pkl"
+    with open(path_sleep_times_TRBD001, "rb") as f:
+        sleep_times_TRBD001 = load(f)
 
-sleep_times_TRBD001["nbu_visit"] = pd.to_datetime(sleep_times_TRBD001["nbu_visit"])
-sleep_dates = pd.Series(sleep_times_TRBD001["nbu_visit"].dt.date.unique())
+    sleep_times_TRBD001["nbu_visit"] = pd.to_datetime(sleep_times_TRBD001["nbu_visit"])
+    sleep_dates = pd.Series(sleep_times_TRBD001["nbu_visit"].dt.date.unique())
 
 all_corr_records = []
 plot_payloads = []
@@ -378,7 +402,7 @@ for pkl_file in pkl_files:
         data = load(f)
 
     df_features = data["df_features"]
-    spectrum = data["df_spec"].iloc[:, 1:31].copy()
+    spectrum = data["df_spec"].iloc[:, 1:300].copy()
 
     df_features = df_features.sort_index()
     spectrum = spectrum.sort_index()
@@ -428,7 +452,10 @@ for pkl_file in pkl_files:
         first_spec_ts = spectrum.index[0]
         last_spec_ts = spectrum.index[-1]
 
-    bpm_oura, met_oura, sleep_oura = get_oura_scores(oura, first_spec_ts, last_spec_ts, "TRBD001")
+    if patient == "TRBD001":
+        bpm_oura, met_oura, sleep_oura = get_oura_scores(oura, first_spec_ts, last_spec_ts, "TRBD001")
+    else:
+        bpm_oura, met_oura, sleep_oura = get_oura_scores(oura, first_spec_ts, last_spec_ts, "TRBD002")
     bpm_oura = _ensure_datetime_index(bpm_oura)
     met_oura = _ensure_datetime_index(met_oura)
     sleep_oura = _ensure_datetime_index(sleep_oura)
@@ -448,23 +475,24 @@ for pkl_file in pkl_files:
     )
 
     unique_dates = pd.Series(pd.Series(df_features.index.date).unique())
-    sleep_intervals = []
-    matching_dates = unique_dates[unique_dates.isin(sleep_dates.values)]
-    for date_sleep in matching_dates:
-        sleep_rows = sleep_times_TRBD001[
-            sleep_times_TRBD001["nbu_visit"].dt.date == date_sleep
-        ]
-        for _, sleep_row in sleep_rows.iterrows():
-            sleep_start_ts = _sleep_time_to_timestamp(sleep_row["sleep_start"], date_sleep)
-            sleep_end_ts = _sleep_time_to_timestamp(sleep_row["sleep_end"], date_sleep)
-            if sleep_end_ts < sleep_start_ts:
-                sleep_end_ts = sleep_end_ts + pd.Timedelta(days=1)
-            sleep_intervals.append((sleep_start_ts, sleep_end_ts))
+    if PLOT_SLEEP:
+        sleep_intervals = []
+        matching_dates = unique_dates[unique_dates.isin(sleep_dates.values)]
+        for date_sleep in matching_dates:
+            sleep_rows = sleep_times_TRBD001[
+                sleep_times_TRBD001["nbu_visit"].dt.date == date_sleep
+            ]
+            for _, sleep_row in sleep_rows.iterrows():
+                sleep_start_ts = _sleep_time_to_timestamp(sleep_row["sleep_start"], date_sleep)
+                sleep_end_ts = _sleep_time_to_timestamp(sleep_row["sleep_end"], date_sleep)
+                if sleep_end_ts < sleep_start_ts:
+                    sleep_end_ts = sleep_end_ts + pd.Timedelta(days=1)
+                sleep_intervals.append((sleep_start_ts, sleep_end_ts))
 
-    sleep_rule = "sleep_intervals"
-    if not sleep_intervals:
-        sleep_intervals = _build_default_sleep_intervals(df_features.index)
-        sleep_rule = "fallback_20_08"
+        sleep_rule = "sleep_intervals"
+        if not sleep_intervals:
+            sleep_intervals = _build_default_sleep_intervals(df_features.index)
+            sleep_rule = "fallback_20_08"
 
     met_oura_10s = pd.to_numeric(met_oura_series, errors="coerce")
     met_oura_10s = pd.Series(met_oura_10s).sort_index()
@@ -473,6 +501,10 @@ for pkl_file in pkl_files:
     else:
         met_oura_10s = pd.Series(index=df_features.index, dtype=float)
 
+    df_audio_visit = df_audio_grouped.query("index >= @first_spec_ts and index <= @last_spec_ts")
+    df_audio_visit = df_audio_visit.reindex(df_features.index, method="nearest")
+    df_audio_visit["word_duration"] = df_audio_visit["word_duration"].fillna(0) 
+
     corr_input_df = pd.DataFrame(
         {
             "active_sensing_band_log": active_sensing_band_log,
@@ -480,19 +512,22 @@ for pkl_file in pkl_files:
             "theta": theta,
             "alpha": alpha,
             "oura_met": met_oura_10s,
+            "audio_word_duration": df_audio_visit["word_duration"],
+            "audio_word_count": df_audio_visit["word_count"],
         }
     )
 
     visit_meta = _parse_visit_metadata(pkl_file.stem)
     visit_meta["file_name"] = pkl_file.name
-    all_corr_records.extend(
-        _compute_segment_correlations(
-            feature_df=corr_input_df,
-            sleep_intervals=sleep_intervals,
-            visit_meta=visit_meta,
-            sleep_rule=sleep_rule,
+    if PLOT_SLEEP:
+        all_corr_records.extend(
+            _compute_segment_correlations(
+                feature_df=corr_input_df,
+                sleep_intervals=sleep_intervals,
+                visit_meta=visit_meta,
+                sleep_rule=sleep_rule,
+            )
         )
-    )
 
     plot_payloads.append(
         {
@@ -521,7 +556,7 @@ if plot_payloads:
         fig, axes = plt.subplots(
             3,
             n_cols,
-            figsize=(4.6 * n_cols, 10),
+            figsize=(3 * n_cols, 7),
             gridspec_kw={"height_ratios": [2, 1.5, 1.5]},
             squeeze=False,
         )
@@ -532,10 +567,11 @@ if plot_payloads:
             ax_sleep = axes[2, col_idx]
 
             spectrum = payload["spectrum"]
-            sleep_intervals = payload["sleep_intervals"]
+            if PLOT_SLEEP:
+                sleep_intervals = payload["sleep_intervals"]
             x_start = payload["first_spec_ts"].floor("h")
             x_end = payload["last_spec_ts"].ceil("10min")
-            full_hour_ticks = pd.date_range(start=x_start, end=x_end, freq="1h", tz=x_start.tz)
+            full_hour_ticks = pd.date_range(start=x_start, end=x_end, freq="2h", tz=x_start.tz)
 
             if not spectrum.empty:
                 x_num = mdates.date2num(spectrum.index.to_pydatetime())
@@ -546,11 +582,16 @@ if plot_payloads:
                     y_freq,
                     z_power,
                     shading="gouraud",
+                    #rasterized=True,
                     cmap="viridis",
                     vmin=SPECTRUM_VMIN,
                     vmax=SPECTRUM_VMAX,
                 )
                 ax_spec.xaxis_date()
+                y_ticks = y_freq[::50]
+                ax_spec.set_yticks(y_ticks)
+                ax_spec.set_yticklabels([str(int(round(v))) for v in y_ticks])
+
 
             _plot_measure(
                 ax_active,
@@ -558,7 +599,7 @@ if plot_payloads:
                 "Active Sensing Band Power (log)",
                 "log(Band Power)",
                 color="blue",
-                sleep_intervals=sleep_intervals,
+                #sleep_intervals=sleep_intervals,
                 scatter_clip_min=-1.5,
                 scatter_clip_max=2,
             )
@@ -577,7 +618,7 @@ if plot_payloads:
                 payload["sleep_oura_series"],
                 "Oura Sleep Stages",
                 "Stage",
-                sleep_intervals=sleep_intervals,
+                sleep_intervals=sleep_intervals if PLOT_SLEEP else None,
             )
 
             title_side = str(payload["side"]).upper()
@@ -596,17 +637,18 @@ if plot_payloads:
 
             for row_idx, ax in enumerate((ax_spec, ax_active, ax_sleep)):
                 ax.set_xlim(x_start, x_end)
-                ax.xaxis.set_major_locator(mdates.MinuteLocator(byminute=[0, 30], tz=LOCAL_TZ))
+                ax.xaxis.set_major_locator(mdates.HourLocator(interval=2, tz=LOCAL_TZ))
+                ax.xaxis.set_major_formatter(mdates.DateFormatter("%H", tz=LOCAL_TZ))
                 ax.xaxis.set_major_formatter(
                     mticker.FuncFormatter(
-                        lambda x, pos: pd.Timestamp(mdates.num2date(x)).tz_convert(LOCAL_TZ).strftime("%m-%d %H:%M")
-                        if pd.Timestamp(mdates.num2date(x)).tz_convert(LOCAL_TZ).minute % 30 == 0
+                        lambda x, pos: pd.Timestamp(mdates.num2date(x)).tz_convert(LOCAL_TZ).strftime("%H")
+                        if pd.Timestamp(mdates.num2date(x)).tz_convert(LOCAL_TZ).minute % 120 == 0
                         else ""
                     )
                 )
                 for hour_ts in full_hour_ticks:
                     ax.axvline(hour_ts, linestyle="--", linewidth=0.7, color="0.65", alpha=0.45, zorder=0)
-                ax.tick_params(axis="x", labelrotation=90, labelsize=5, labelbottom=(row_idx == 2))
+                ax.tick_params(axis="x", labelrotation=90, labelsize=10, labelbottom=(row_idx == 2))
                 plt.setp(ax.get_xticklabels(), rotation=90, ha="center")
 
             ax_sleep.set_xlabel("Time")
@@ -614,8 +656,8 @@ if plot_payloads:
         fig.suptitle(f"{side} side", fontsize=12)
         fig.tight_layout(rect=[0, 0, 1, 0.96])
         side_slug = re.sub(r"[^A-Za-z0-9_-]+", "_", str(side))
-        fig.savefig(output_dir / f"all_visits_side_by_side_{side_slug}_clipped.png", dpi=200)
-        plt.close(fig)
+        #fig.savefig(output_dir / f"all_visits_side_by_side_{side_slug}_clipped.png", dpi=200)
+        #plt.close(fig)
 
 
 corr_out = pd.DataFrame(all_corr_records)

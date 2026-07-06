@@ -7,6 +7,7 @@ import os
 import pickle
 import matplotlib.pyplot as plt
 from joblib import Parallel, delayed
+import sys
 
 BANDS = {
     "delta": (1, 4),
@@ -25,22 +26,53 @@ def resample_spectrogram(df_spec, rule="1min"):
     #return df_spec.resample(rule).apply(lambda x: np.nanmean(x, axis=0))
     return df_spec.resample(rule).mean()
 
-def compute_psd_windows(timeseries, time_index, fs=250, window_seconds=10, only_int_frequencies=True):
+def compute_psd_windows(
+    timeseries,
+    time_index,
+    fs=250,
+    window_seconds=10,
+    step_seconds=0.2,
+    only_int_frequencies=True,
+    power_method="fft",
+):
     window_samples = int(window_seconds * fs)
+    step_samples = int(step_seconds * fs)
+    if window_samples <= 0:
+        raise ValueError("window_seconds must be > 0")
+    if step_samples <= 0:
+        raise ValueError("step_seconds must be > 0")
+
+    power_method = str(power_method).lower()
+    if power_method not in {"welch", "fft"}:
+        raise ValueError("power_method must be either 'welch' or 'fft'")
+
     spectra = []
     times = []
+    freqs = None
 
-    for i in range(0, len(timeseries) - 125, window_samples):
+    for i in range(0, len(timeseries) - window_samples + 1, step_samples):
         if i + window_samples > len(timeseries):
             break
-        freqs, pxx = signal.welch(
-            timeseries[i : i + window_samples].values,
-            fs=fs,
-            nperseg=window_samples,
-            noverlap=window_samples / 2,
-        )
+
+        window_data = timeseries[i : i + window_samples].values
+        if power_method == "welch":
+            freqs, pxx = signal.welch(
+                window_data,
+                fs=fs,
+                nperseg=window_samples,
+                noverlap=0,
+            )
+        else:
+            fft_vals = np.fft.rfft(window_data)
+            freqs = np.fft.rfftfreq(window_samples, d=1.0 / fs)
+            # Plain FFT-based power estimate.
+            pxx = (np.abs(fft_vals) ** 2) / window_samples
+
         spectra.append(pxx)
         times.append(time_index[i])
+
+    if len(spectra) == 0:
+        return pd.DataFrame(index=pd.Index([], dtype="datetime64[ns]")), np.asarray([])
 
     df_spec = pd.DataFrame(np.asarray(spectra), index=np.asarray(times), columns=freqs)
     if only_int_frequencies:
@@ -177,7 +209,17 @@ def get_files_and_channels(folder_="perceive"):
 
 def run_pipeline(NBU_LFP_PATH, NBU_CHANNEL):
     ts, df_nbu = load_nbu_signal(NBU_LFP_PATH, NBU_CHANNEL)
-    df_spec, freqs = compute_psd_windows(ts, df_nbu.index, fs=250, window_seconds=10, only_int_frequencies=False)
+    #df_spec, freqs = compute_psd_windows(ts, df_nbu.index, fs=250, window_seconds=10, only_int_frequencies=False)
+    df_spec, freqs = compute_psd_windows(
+        ts,
+        df_nbu.index,
+        fs=250,
+        window_seconds=1,
+        step_seconds=0.2,
+        only_int_frequencies=False,
+        power_method="fft",
+    )
+
     #df_spec_1min = resample_spectrogram(df_spec, rule="1min")
 
     df_aperiodic_params, df_aperiodic, df_periodic, df_spec_original = compute_fooof_decomposition(
@@ -205,7 +247,7 @@ def run_pipeline(NBU_LFP_PATH, NBU_CHANNEL):
     }
     # save in same directory as input file
     save_dir = os.path.dirname(NBU_LFP_PATH)
-    save_path = os.path.join(save_dir, f"spectra_highres_fooof_bandpower_{NBU_CHANNEL}.pkl")
+    save_path = os.path.join(save_dir, f"spectra_percept_fft_fooof_bandpower_{NBU_CHANNEL}.pkl")
 
     with open(save_path, "wb") as f:
         pickle.dump(d_save, f)
@@ -221,10 +263,14 @@ if __name__ == "__main__":
     #     NBU_CHANNEL = row["channel"]
     #     run_pipeline(NBU_LFP_PATH, NBU_CHANNEL)
 
-    Parallel(n_jobs=-1)(
-        delayed(run_pipeline)(row["path"], row["channel"])
-        for idx, row in l_.iterrows()
-    )
+    run_idx = int(sys.argv[1]) if len(sys.argv) > 1 else 0
+
+    run_pipeline(l_.iloc[run_idx]["path"], l_.iloc[run_idx]["channel"])
+
+    # Parallel(n_jobs=-1)(
+    #     delayed(run_pipeline)(row["path"], row["channel"])
+    #     for idx, row in l_.iterrows()
+    # )
 
     # l_ = get_files_and_channels("raw")
 

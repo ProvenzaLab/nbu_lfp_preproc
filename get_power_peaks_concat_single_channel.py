@@ -307,7 +307,7 @@ def get_oura_scores(oura_scores, date_first, date_last, subject):
 
 oura = pd.read_pickle("oura_scores.pkl")
 
-base_dir = Path("nbu_concat_single_channel")
+base_dir = Path("nbu_concat_single_channel_TRBD002")
 pkl_files = sorted(base_dir.glob("spectra_fooof_bandpower_*.pkl"))
 
 output_dir = Path("out_figures_concat_single_channel_tight")

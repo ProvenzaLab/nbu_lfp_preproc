@@ -10,3 +10,4 @@ nbu_concat/*
 *.pdf
 *.out
 *.log
+logs/*

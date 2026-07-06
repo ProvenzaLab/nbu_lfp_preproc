@@ -9,8 +9,8 @@ import pandas as pd
 
 FILE_PREFIX = "spectra_highres_fooof_bandpower_"
 FILE_GLOB = "*/rawlfp/raw/spectra_highres_fooof_bandpower_*.pkl"
-BASE_DIR = Path("/mnt/labworlds/Provenza/NBUPipeline/TRBD001")
-OUTPUT_DIR = Path("nbu_concat_single_channel")
+BASE_DIR = Path("/mnt/labworlds/Provenza/NBUPipeline/TRBD002")  # TRBD001
+OUTPUT_DIR = Path("nbu_concat_single_channel_TRBD002")  # TRBD001
 MAX_GAP_DAYS = 4
 PREFERRED_CONTACTS = ("ONE_THREE", "ZERO_TWO", "ZERO_THREE")
 VALID_SIDES = ("LEFT", "RIGHT")

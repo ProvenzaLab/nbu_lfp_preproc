@@ -8,21 +8,24 @@ import pandas as pd
 import seaborn as sns
 
 
-INPUT_PATH = Path("out_figures_concat_single_channel/corr_10min_segments.pkl")
-OUTPUT_DIR = Path("out_figures_concat_single_channel")
-OUTPUT_FIG = OUTPUT_DIR / "corr_distribution_hue_visits.png"
+INPUT_PATH = Path("out_figures_concat_single_channel_tight_TRBD001/corr_10min_segments.pkl")
+OUTPUT_DIR = Path("out_figures_concat_single_channel_tight_TRBD001")
 
 TARGET_PAIRS = [
     "active_sensing_band_log__offset",
     "active_sensing_band_log__theta",
     "active_sensing_band_log__alpha",
     "active_sensing_band_log__oura_met",
+    "active_sensing_band_log__audio_word_duration",
+    "active_sensing_band_log__audio_word_count",
 ]
 PAIR_LABELS = {
     "active_sensing_band_log__offset": "ASB vs Offset",
     "active_sensing_band_log__theta": "ASB vs Theta",
     "active_sensing_band_log__alpha": "ASB vs Alpha",
     "active_sensing_band_log__oura_met": "ASB vs MET",
+    "active_sensing_band_log__audio_word_duration": "ASB vs Audio Word Duration",
+    "active_sensing_band_log__audio_word_count": "ASB vs Audio Word Count",
 }
 
 
@@ -45,7 +48,12 @@ def _visit_order_and_labels(df: pd.DataFrame) -> tuple[list[str], dict[str, str]
     return visit_order, label_map
 
 
-def main() -> None:
+def main(DAYTIME=True) -> None:
+    if DAYTIME:
+        OUTPUT_FIG = OUTPUT_DIR / "corr_distribution_hue_visits_daytime.png"
+    else:
+        OUTPUT_FIG = OUTPUT_DIR / "corr_distribution_hue_visits_nighttime.png"
+
     if not INPUT_PATH.exists():
         raise FileNotFoundError(f"Missing input file: {INPUT_PATH}")
 
@@ -68,7 +76,10 @@ def main() -> None:
 
     df = df.copy()
     df["visit_start_date"] = pd.to_datetime(df["visit_start_date"])
-    df = df[~df["sleep_present"].astype(bool)].copy()
+    if DAYTIME:
+        df = df[~df["sleep_present"].astype(bool)].copy()
+    else:
+        df = df[df["sleep_present"].astype(bool)].copy()
     df = df[df["pair"].isin(TARGET_PAIRS)].copy()
     df = df[np.isfinite(df["correlation"].to_numpy(dtype=float))]
 
@@ -163,4 +174,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    main(DAYTIME=False)
