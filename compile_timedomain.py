@@ -50,7 +50,7 @@ def read_lfp_data(pt, window=None, plot=False, ecg_method=None, save=True):
             session_tz = parser.js['ProgrammerUtcOffset']
 
             start = parse(window[0]).replace(tzinfo=TZ)
-            end = parse(window[1]).replace(tzinfo=TZ)
+            end = parse(window[1]).replace(tzinfo=TZ) + timedelta(hours=12)
 
             session_utc = isoparse(session_start)
             tz = isoparse(f"2000-01-01T00:00:00{session_tz}").tzinfo
@@ -68,14 +68,33 @@ def read_lfp_data(pt, window=None, plot=False, ecg_method=None, save=True):
             continue # Skip file with duplicate tablet, ipg start times
         else:
             files_.append(file_meta)
-
+        
+        # Read Timedomain data from file
         for id in [True, False]:
             data = parser.read_timedomain_data(indefinite_streaming=id)
 
             if len(data) != 0:
                 df = pd.concat(data)
                 df['filename'] = filename.split(os.sep)[-1]
-                chunks.append(df)
+
+                # Create columns for other info
+                df['lead_location'] = parser.lead_location
+                df['lead_model'] = parser.lead_model
+                df['ipg_hemisphere'] = filename.split(os.sep)[-2]
+
+                # Read stimulation settings
+                setting_cols = ['frequency', 'stim_cathode', 'stim_anode', 'sensing_contacts', 'pulse_width', 'suspend_amplitude', 'lower_amplitude', 'upper_amplitude']
+                index_cols = ['start_time', 'end_time']
+
+                stim_settings = parser.stim_settings.active_group_history.drop_duplicates(subset=[*index_cols, 'hem', 'filename']).pivot(
+                    index=index_cols, columns='hem', values=setting_cols)
+                
+                stim_settings.columns = [f'{"left" if h == "Left" else "right"}_{p}' for p, h in stim_settings.columns]
+                stim_settings = stim_settings.reset_index().sort_values('start_time')
+                df.sort_index(inplace=True)
+                merged_df = pd.merge_asof(df, stim_settings, left_on='Time', right_on='start_time', direction='backward')
+                merged_df.index = df.index
+                chunks.append(merged_df)
 
                 if plot:
                     out_path = target_folder / 'plots'
@@ -97,9 +116,6 @@ def read_lfp_data(pt, window=None, plot=False, ecg_method=None, save=True):
     # Drop duplicate rows with nan LFP values
     chs = [ch for ch in pt_df.columns if 'LEFT' in ch or 'RIGHT' in ch]
     pt_df = pt_df[~(pt_df.index.duplicated(keep=False) & pt_df[chs].isna().all(axis=1))]
-
-    # Convert timestamps to Central + create CT times column
-    pt_df['CT_times'] = pt_df.index.to_series().dt.tz_convert('America/Chicago')
     
     # Manually adjust times for files with abnormal tablet end times
     drift_df = pd.read_csv('utils/time_drift_per_file_final.csv', delimiter=';')
@@ -107,10 +123,8 @@ def read_lfp_data(pt, window=None, plot=False, ecg_method=None, save=True):
     drift_df.query('pt_id == @pt and filename.isin(@pt_df.filename)', inplace=True)
     pt_df = correct_time_drift(pt_df, drift_df[drift_df['tablet_end_time'].isna()])
 
-    # Create columns for other info
-    pt_df['lead_location'] = parser.lead_location
-    pt_df['lead_model'] = parser.lead_model
-    pt_df['ipg_hemisphere'] = filename.split(os.sep)[-2]
+    # Convert timestamps to Central + create CT times column
+    pt_df['CT_times'] = pt_df.index.to_series().dt.tz_convert('America/Chicago')
     
     if save:
         target_fp = target_folder / f'{pt}_{start.strftime("%Y-%m-%d")}-{end.strftime("%Y-%m-%d")}_timedomain_LFP.parq'
@@ -127,6 +141,9 @@ if __name__ == '__main__':
 
     for path in pt_paths:
         pt = path.split(os.sep)[-2]
+        if pt != 'TRBD001' and pt != 'TRBD002':
+            continue
+
         if os.path.exists(os.path.join(path, 'NBU')):
             nbu_paths = glob.glob('NBU/*', root_dir=path)
             nbu_dates = extract_consecutive_days(nbu_paths)
@@ -134,6 +151,8 @@ if __name__ == '__main__':
             for nbu_visit in nbu_dates:
                 print(f'Processing {pt} NBU visit from {nbu_visit[0]} to {nbu_visit[1]}')
                 for method in [None, 'template', 'perceive']:
+                    if method is not None:
+                        continue
                     print(f'ECG method: {method}')
                     """ if os.path.exists(LAB_WORLDS / 'Provenza' / 'NBUPipeline' / pt / nbu_visit[0] / 'rawlfp' / method if method else 'raw' / f'{pt}_{nbu_visit[0]}-{nbu_visit[1]}_timedomain_LFP.parq'):
                         print('Already processed')

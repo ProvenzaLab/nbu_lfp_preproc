@@ -31,7 +31,6 @@ def correct_time_drift(lfp_df, drift_df):
         drift = row.time_drift_seconds
         mask = lfp_df['filename'] == filename
 
-        lfp_df.loc[mask, 'CT_times'] -= timedelta(seconds=drift)
         lfp_df.index = lfp_df.index.where(~mask, lfp_df.index - timedelta(seconds=drift))
     
     return lfp_df
