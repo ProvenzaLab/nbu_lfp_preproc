@@ -138,3 +138,76 @@ def plot_lfp_spectrogram(lfp_df, ch, fs, nperseg, max_freq, ax):
     ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d %I:%M %p', tz='America/Chicago'))
 
     return ax
+
+def plot_hour_psd_comparison(hour_dfs_by_method, chs, hour, fs, nperseg=1000):
+    """
+    Compare the PSD (0-30 Hz) of each channel for a single hour across ECG-cleaning methods.
+
+    Parameters
+    ----------
+    hour_dfs_by_method : dict[str, pd.DataFrame]
+        Mapping of method label (e.g. 'raw', 'template', 'perceive') to the LFP dataframe
+        already sliced to just this hour (e.g. via utils.cleaning.group_by_hour). Callers
+        should only include methods that actually have data for this hour.
+    chs : list[str]
+        Channel columns to plot (one row each).
+    hour : pd.Timestamp
+        The hour being compared, used only for the figure title.
+    fs : float
+        Sampling frequency in Hz.
+    nperseg : int, optional
+        Welch segment length, capped to the available samples for that hour.
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+    """
+    methods = [m for m, df in hour_dfs_by_method.items() if df is not None and not df.empty]
+    if not methods:
+        raise ValueError(f"No data available for hour {hour}")
+
+    n_rows, n_cols = len(chs), len(methods)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 4 * n_rows), squeeze=False)
+
+    for col, method in enumerate(methods):
+        hour_df = hour_dfs_by_method[method]
+
+        for row, ch in enumerate(chs):
+            ax = axes[row, col]
+            signal_vals = pd.to_numeric(hour_df[ch], errors='coerce').dropna().to_numpy()
+
+            if len(signal_vals) < 2:
+                ax.set_title(f'{method} - {ch}\n(no data)')
+                ax.axis('off')
+                continue
+
+            seg_len = min(nperseg, len(signal_vals))
+            freqs, psd = welch(signal_vals, fs=fs, nperseg=seg_len)
+            mask = (freqs >= 0) & (freqs <= 30)
+
+            ax.semilogy(freqs[mask], psd[mask], linewidth=1.2)
+            ax.set_title(f'{method} - {ch}')
+            ax.set_xlabel('Frequency (Hz)')
+            ax.set_ylabel('PSD')
+            ax.grid(True, which='both', linestyle='--', linewidth=0.5, alpha=0.6)
+
+    fig.suptitle(f'Hourly PSD comparison — {hour}')
+    fig.tight_layout()
+    return fig
+
+def plot_outlier_window(df, channel, win_start, win_end, fs):
+    """
+    Plot the time-series signal in a candidate artifact window for a single channel,
+    for the user to review during artifact-removal.
+    """
+    window_df = df.loc[win_start:win_end]
+
+    fig, ax = plt.subplots(1, 1, figsize=(10, 4))
+    ax.plot(window_df['CT_times'], window_df[channel], linewidth=1.0)
+    ax.set_title(f'{channel} — candidate artifact ({win_start} to {win_end})')
+    ax.set_xlabel('Time')
+    ax.set_ylabel('Signal')
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S', tz='America/Chicago'))
+    fig.tight_layout()
+
+    return fig
