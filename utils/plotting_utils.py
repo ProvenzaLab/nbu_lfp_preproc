@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 
 from scipy.signal import welch, spectrogram, butter, sosfilt
+from scipy.stats import zscore
 
 from utils.utils import find_non_nan_segments
 
@@ -123,13 +124,13 @@ def plot_lfp_spectrogram(lfp_df, ch, fs, nperseg, max_freq, ax):
         f, t_bins, Sxx = spectrogram(lfp_values, fs, nperseg=nperseg, noverlap=nperseg//2)
         freq_mask = f <= max_freq
 
-        Sxx_db = np.clip(10 * np.log10(Sxx[freq_mask]), -50, 0)
+        Sxx_db = np.clip(10 * np.log10(Sxx[freq_mask]), -35, 0)
 
         ax.imshow(
             Sxx_db, aspect='auto', origin='lower',
             extent=[times[0], times[-1],
                     f[freq_mask].min(), f[freq_mask].max()],
-            cmap=cmap, vmin=-50, vmax=0,  # fix color scale across segments
+            cmap=cmap, vmin=-35, vmax=0,  # fix color scale across segments
         )
 
     ax.set_title(f'LFP [{ch}]')
@@ -195,7 +196,65 @@ def plot_hour_psd_comparison(hour_dfs_by_method, chs, hour, fs, nperseg=1000):
     fig.tight_layout()
     return fig
 
-def plot_outlier_window(df, channel, win_start, win_end, fs):
+def plot_full_spectrogram(df, chs, fs, nperseg=1000, max_freq=30):
+    """
+    Spectrogram of the entire (stitched, artifact-cleaned) recording, one row per channel.
+    """
+    fig, axes = plt.subplots(len(chs), 1, figsize=(14, 5 * len(chs)), sharex=True, squeeze=False)
+    axes = axes[:, 0]
+
+    for ch, ax in zip(chs, axes):
+        plot_lfp_spectrogram(df, ch, fs=fs, nperseg=nperseg, max_freq=max_freq, ax=ax)
+
+    fig.suptitle('Clean data spectrogram')
+    fig.tight_layout()
+    return fig
+
+
+def plot_zscored_power_over_time(df, chs, fs, window_seconds=60):
+    """
+    Z-scored windowed RMS power over time, one row per channel — lets the user
+    visually spot residual drift or artifacts across the whole clean recording.
+    """
+    window_samples = int(window_seconds * fs)
+    times = pd.to_datetime(df['CT_times']).to_numpy()
+
+    fig, axes = plt.subplots(len(chs), 1, figsize=(14, 3 * len(chs)), sharex=True, squeeze=False)
+    axes = axes[:, 0]
+
+    for ch, ax in zip(chs, axes):
+        signal_vals = pd.to_numeric(df[ch], errors='coerce').to_numpy()
+        n_windows = len(signal_vals) // window_samples
+
+        if n_windows < 2:
+            ax.set_title(f'{ch} (insufficient data)')
+            ax.axis('off')
+            continue
+
+        power = np.full(n_windows, np.nan)
+        win_times = np.empty(n_windows, dtype=times.dtype)
+        for i in range(n_windows):
+            start, end = i * window_samples, (i + 1) * window_samples
+            seg = signal_vals[start:end]
+            valid = seg[~np.isnan(seg)]
+            if len(valid) > 0:
+                power[i] = np.sqrt(np.mean(valid ** 2))
+            win_times[i] = times[start + window_samples // 2]
+
+        z_power = zscore(power, nan_policy='omit')
+
+        ax.plot(win_times, z_power, linewidth=1.0)
+        ax.axhline(0, color='gray', linewidth=0.5, linestyle='--')
+        ax.set_title(f'{ch} — z-scored power ({window_seconds}s windows)')
+        ax.set_ylabel('Z-score')
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d %I:%M %p', tz='America/Chicago'))
+
+    axes[-1].set_xlabel('Time')
+    fig.tight_layout()
+    return fig
+
+
+def plot_outlier_window(df, channel, win_start, win_end, events_df):
     """
     Plot the time-series signal in a candidate artifact window for a single channel,
     for the user to review during artifact-removal.
@@ -204,10 +263,17 @@ def plot_outlier_window(df, channel, win_start, win_end, fs):
 
     fig, ax = plt.subplots(1, 1, figsize=(10, 4))
     ax.plot(window_df['CT_times'], window_df[channel], linewidth=1.0)
+    events = events_df.query('start_dt <= @win_end and end_dt >= @win_start') if not events_df.empty else pd.DataFrame()
+    for _, event in events.iterrows():
+        ax.axvspan(event['start_dt'], event['end_dt'], alpha=0.3, label=f"{event['Event']}")
+
     ax.set_title(f'{channel} — candidate artifact ({win_start} to {win_end})')
     ax.set_xlabel('Time')
     ax.set_ylabel('Signal')
+    ax.set_xlim(window_df['CT_times'].min(), window_df['CT_times'].max())
     ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S', tz='America/Chicago'))
+    if not events.empty:
+        ax.legend(loc='upper right', fontsize='small')
     fig.tight_layout()
 
     return fig

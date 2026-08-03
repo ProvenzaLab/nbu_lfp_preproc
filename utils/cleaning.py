@@ -17,29 +17,29 @@ def load_all_ecg_methods(pt, window):
     """Load LFP data for a patient/visit window under all three ECG-cleaning methods.
 
     Returns {'raw': df, 'template': df, 'perceive': df}, omitting methods with no data.
+    Methods whose compiled parquet already exists are read straight from disk instead
+    of being re-parsed from the raw session files.
     """
-    target_folder = LAB_WORLDS / 'Provenza' / 'NBUPipeline' / pt / window[0] / 'rawlfp' 
+    target_folder = LAB_WORLDS / 'Provenza' / 'NBUPipeline' / pt / window[0] / 'rawlfp'
     dfs = {}
+    missing_methods = []
 
-    methods = list(ECG_METHODS.keys())
-    for method in methods:
+    for method in ECG_METHODS:
         fp = target_folder / ECG_METHODS[method] / f'{pt}_{window[0]}-{window[1]}_timedomain_LFP.parq'
         if os.path.exists(fp):
-            df = pd.read_parquet(fp)
+            dfs[ECG_METHODS[method]] = pd.read_parquet(fp)
+        else:
+            missing_methods.append(method)
+
+    if missing_methods:
+        results = Parallel(n_jobs=len(missing_methods))(
+            delayed(read_lfp_data)(pt, window=window, ecg_method=m, save=True) for m in missing_methods
+        )
+        for method, df in zip(missing_methods, results):
             label = ECG_METHODS[method]
-            dfs[label] = df
-            methods.remove(method)
+            if df is not None and not df.empty:
+                dfs[label] = df
 
-    
-    results = Parallel(n_jobs=len(methods))(
-        delayed(read_lfp_data)(pt, window=window, ecg_method=m, save=True) for m in methods
-    )
-
-    for method, df in zip(methods, results):
-        label = ECG_METHODS[method]
-        if df is not None and not df.empty:
-            dfs[label] = df
-    
     return dfs
 
 
@@ -127,6 +127,70 @@ def detect_outlier_peaks(df, chs, fs, sd_threshold=10, pad_seconds=5):
 def remove_outlier_window(df, channel, win_start, win_end):
     df.loc[win_start:win_end, channel] = np.nan
     return df
+
+
+def extract_template(df, channel, peak_time, fs, template_seconds=1.0):
+    """Extract a fixed-length, z-scored window centered on a candidate peak.
+
+    Used both to save a new artifact template (on manual "Remove") and to score
+    a not-yet-reviewed candidate against saved templates. Must be called before
+    the window is NaN'd out by remove_outlier_window.
+
+    Returns a 1D np.ndarray, or None if a clean fixed-length window isn't
+    available (e.g. peak too close to the data edge or a NaN gap, or a
+    zero-variance window).
+    """
+    pos = df.index.get_loc(peak_time)
+    if isinstance(pos, (slice, np.ndarray)):
+        pos = np.atleast_1d(np.arange(len(df))[pos])[0]
+
+    half = int(template_seconds / 2 * fs)
+    start, end = pos - half, pos + half + 1
+    if start < 0 or end > len(df):
+        return None
+
+    window = pd.to_numeric(df[channel].iloc[start:end], errors='coerce').to_numpy()
+    if np.isnan(window).any():
+        return None
+
+    std = window.std()
+    if std == 0:
+        return None
+
+    return (window - window.mean()) / std
+
+
+def match_template(window, templates, max_lag=20):
+    """Best normalized cross-correlation between a candidate window and any saved template.
+
+    Searches lags in [-max_lag, max_lag] samples to tolerate peak-alignment jitter.
+    Returns 0.0 if there are no templates or no template matches the window length.
+    """
+    if window is None or not templates:
+        return 0.0
+
+    n = len(window)
+    best = 0.0
+    for template in templates:
+        if len(template) != n:
+            continue
+        for lag in range(-max_lag, max_lag + 1):
+            if lag >= 0:
+                a, b = window[lag:], template[:n - lag]
+            else:
+                a, b = window[:n + lag], template[-lag:]
+
+            if len(a) < n // 2:
+                continue
+
+            a_c, b_c = a - a.mean(), b - b.mean()
+            denom = np.linalg.norm(a_c) * np.linalg.norm(b_c)
+            if denom == 0:
+                continue
+
+            best = max(best, float(np.dot(a_c, b_c) / denom))
+
+    return best
 
 
 def save_clean_dataset(df, pt, window, hour_selections, removed_outliers):

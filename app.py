@@ -12,7 +12,9 @@ Percept LFP data for a single patient/visit window:
   3. Stitch the selected hourly chunks into one clean dataset.
   4. Flag high-amplitude artifacts (>10 SD peaks) and let the user approve or
      reject removal of the 10s window around each.
-  5. Save the cleaned dataset and run the spectral/FOOOF/bandpower pipeline
+  5. Review a summary of the clean data: a full spectrogram and a z-scored
+     power-over-time plot, for each channel.
+  6. Save the cleaned dataset and run the spectral/FOOOF/bandpower pipeline
      on it.
 
 Run with:  streamlit run app.py   (opens http://localhost:8501)
@@ -29,10 +31,13 @@ Deployment options considered for this platform:
     deployment.
 """
 
+import os
+
 import streamlit as st
+import pandas as pd
 import matplotlib.pyplot as plt
 
-from utils.config import STUDY_IDS, FS
+from utils.config import STUDY_IDS, FS, get_events
 from utils.cleaning import (
     load_all_ecg_methods,
     group_by_hour,
@@ -40,9 +45,16 @@ from utils.cleaning import (
     stitch_selected_hours,
     detect_outlier_peaks,
     remove_outlier_window,
+    extract_template,
+    match_template,
     save_clean_dataset,
 )
-from utils.plotting_utils import plot_hour_psd_comparison, plot_outlier_window
+from utils.plotting_utils import (
+    plot_hour_psd_comparison,
+    plot_outlier_window,
+    plot_full_spectrogram,
+    plot_zscored_power_over_time,
+)
 import compute_spectra_fooof_bandpower as fooof_pipeline
 
 st.set_page_config(page_title="NBU LFP Preprocessing Platform", layout="wide")
@@ -66,6 +78,9 @@ def init_state():
         'outlier_candidates': None,
         'outlier_idx': 0,
         'removed_outliers': [],
+        'artifact_templates': {},
+        'auto_removed': [],
+        'events_df': pd.DataFrame(),
     }
     for key, val in defaults.items():
         st.session_state.setdefault(key, val)
@@ -85,7 +100,10 @@ def finish_hour_review():
     st.session_state.outlier_candidates = candidates
     st.session_state.outlier_idx = 0
     st.session_state.removed_outliers = []
-    st.session_state.stage = 'outliers' if candidates else 'save'
+    st.session_state.artifact_templates = {}
+    st.session_state.auto_removed = []
+    st.session_state.events_df = get_events(st.session_state.pt, st.session_state.window)
+    st.session_state.stage = 'outliers' if candidates else 'summary'
 
 
 def go_next_hour(selected_method):
@@ -105,16 +123,25 @@ def handle_outlier(remove):
     idx = st.session_state.outlier_idx
     candidate = st.session_state.outlier_candidates[idx]
     if remove:
+        template = extract_template(st.session_state.clean_df, candidate['channel'], candidate['peak_time'], FS)
+        if template is not None:
+            st.session_state.artifact_templates.setdefault(candidate['channel'], []).append(template)
+
         remove_outlier_window(st.session_state.clean_df, candidate['channel'], candidate['win_start'], candidate['win_end'])
         st.session_state.removed_outliers.append(candidate)
     st.session_state.outlier_idx += 1
     if st.session_state.outlier_idx >= len(st.session_state.outlier_candidates):
-        st.session_state.stage = 'save'
+        st.session_state.stage = 'summary'
 
 
 init_state()
 st.title("NBU LFP Preprocessing Platform")
 st.sidebar.button("Start over", on_click=reset_state)
+
+st.sidebar.divider()
+if st.sidebar.button("Shut down app"):
+    st.sidebar.warning("Shutting down — close this browser tab.")
+    os._exit(0)
 
 if st.session_state.stage == 'load':
     st.header("1. Load visit data")
@@ -188,32 +215,89 @@ elif st.session_state.stage == 'hours':
         st.rerun()
 
 elif st.session_state.stage == 'outliers':
+    threshold = st.sidebar.slider(
+        "Template match threshold", min_value=0.5, max_value=1.0, value=0.85, step=0.01,
+        help="Candidates whose waveform shape matches a saved artifact template at or above "
+             "this correlation are auto-removed without a manual click.",
+    )
+
     candidates = st.session_state.outlier_candidates
+
+    # Auto-advance past any not-yet-reviewed candidate that matches a template
+    # saved from an earlier manual "Remove" on the same channel.
+    while st.session_state.outlier_idx < len(candidates):
+        idx = st.session_state.outlier_idx
+        candidate = candidates[idx]
+        window = extract_template(st.session_state.clean_df, candidate['channel'], candidate['peak_time'], FS)
+        score = match_template(window, st.session_state.artifact_templates.get(candidate['channel'], []))
+
+        if score < threshold:
+            break
+
+        remove_outlier_window(st.session_state.clean_df, candidate['channel'], candidate['win_start'], candidate['win_end'])
+        st.session_state.removed_outliers.append(candidate)
+        st.session_state.auto_removed.append({**candidate, 'match_score': round(score, 3)})
+        st.session_state.outlier_idx += 1
+
     idx = st.session_state.outlier_idx
-    candidate = candidates[idx]
 
     st.header("3. Review candidate artifacts (>10 SD peaks)")
-    st.progress(idx / len(candidates))
-    st.subheader(f"Candidate {idx + 1} of {len(candidates)}")
-    st.write(f"Channel **{candidate['channel']}**, peak at **{candidate['peak_time']}**")
 
-    with st.spinner("Rendering candidate window..."):
-        fig = plot_outlier_window(
-            st.session_state.clean_df, candidate['channel'], candidate['win_start'], candidate['win_end'], FS
-        )
-    st.pyplot(fig)
-    plt.close(fig)
+    events_df = st.session_state.events_df
 
-    col1, col2 = st.columns(2)
-    if col1.button("Keep (no artifact)", key=f"keep_{idx}"):
-        handle_outlier(False)
-        st.rerun()
-    if col2.button("Remove (artifact)", key=f"remove_{idx}"):
-        handle_outlier(True)
+    if st.session_state.auto_removed:
+        st.caption(f"{len(st.session_state.auto_removed)} candidate(s) auto-removed via template match so far.")
+
+    if idx >= len(candidates):
+        st.subheader("All candidates reviewed")
+        if st.session_state.auto_removed:
+            st.write("Auto-removed via template match:")
+            st.dataframe(pd.DataFrame(st.session_state.auto_removed)[['channel', 'peak_time', 'match_score']])
+        if st.button("Continue"):
+            st.session_state.stage = 'summary'
+            st.rerun()
+    else:
+        candidate = candidates[idx]
+        st.progress(idx / len(candidates))
+        st.subheader(f"Candidate {idx + 1} of {len(candidates)}")
+        st.write(f"Channel **{candidate['channel']}**, peak at **{candidate['peak_time']}**")
+
+        with st.spinner("Rendering candidate window..."):
+            fig = plot_outlier_window(
+                st.session_state.clean_df, candidate['channel'], candidate['win_start'], candidate['win_end'], events_df
+            )
+        st.pyplot(fig)
+        plt.close(fig)
+
+        col1, col2 = st.columns(2)
+        if col1.button("Keep (no artifact)", key=f"keep_{idx}"):
+            handle_outlier(False)
+            st.rerun()
+        if col2.button("Remove (artifact)", key=f"remove_{idx}"):
+            handle_outlier(True)
+            st.rerun()
+
+elif st.session_state.stage == 'summary':
+    st.header("4. Review clean data summary")
+    st.write(f"Hours reviewed: {len(st.session_state.hour_selections)}")
+    st.write(f"Artifacts removed: {len(st.session_state.removed_outliers)}")
+
+    with st.spinner("Rendering spectrogram of clean data..."):
+        spec_fig = plot_full_spectrogram(st.session_state.clean_df, st.session_state.chs, FS)
+    st.pyplot(spec_fig)
+    plt.close(spec_fig)
+
+    with st.spinner("Rendering z-scored power over time..."):
+        power_fig = plot_zscored_power_over_time(st.session_state.clean_df, st.session_state.chs, FS)
+    st.pyplot(power_fig)
+    plt.close(power_fig)
+
+    if st.button("Continue to save"):
+        st.session_state.stage = 'save'
         st.rerun()
 
 elif st.session_state.stage == 'save':
-    st.header("4. Save clean dataset & compute features")
+    st.header("5. Save clean dataset & compute features")
     st.write(f"Hours reviewed: {len(st.session_state.hour_selections)}")
     st.write(f"Artifacts removed: {len(st.session_state.removed_outliers)}")
 
