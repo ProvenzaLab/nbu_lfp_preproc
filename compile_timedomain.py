@@ -14,7 +14,7 @@ import numpy as np
 from percept_parser.percept import PerceptParser
 from percept_parser import plotter
 from utils.utils import correct_time_drift
-from utils.config import STUDY_IDS, TZ, DATALAKE, LAB_WORLDS, extract_consecutive_days
+from utils.config import STUDY_IDS, TZ, DATALAKE, LAB_WORLDS, PROJECT_WORLDS, extract_consecutive_days
 
 def read_lfp_data(pt, window=None, plot=False, ecg_method=None, save=True):
     if pt[:-3] not in STUDY_IDS.keys() or pt[-3:] == '000' or window is None:
@@ -118,7 +118,7 @@ def read_lfp_data(pt, window=None, plot=False, ecg_method=None, save=True):
     pt_df = pt_df[~(pt_df.index.duplicated(keep=False) & pt_df[chs].isna().all(axis=1))]
     
     # Manually adjust times for files with abnormal tablet end times
-    drift_df = pd.read_csv('utils/time_drift_per_file_final.csv', delimiter=';')
+    drift_df = pd.read_csv(f'{PROJECT_WORLDS}/{STUDY_IDS[pt[:-3]]}/{pt}/{pt}_time_drift.csv', delimiter=',')
     drift_df['filename'] = drift_df['filename'].apply(lambda f: f.split(os.sep)[-1])
     drift_df.query('pt_id == @pt and filename.isin(@pt_df.filename)', inplace=True)
     pt_df = correct_time_drift(pt_df, drift_df[drift_df['tablet_end_time'].isna()])
@@ -129,9 +129,8 @@ def read_lfp_data(pt, window=None, plot=False, ecg_method=None, save=True):
     if save:
         target_fp = target_folder / f'{pt}_{start.strftime("%Y-%m-%d")}-{end.strftime("%Y-%m-%d")}_timedomain_LFP.parq'
         pt_df.to_parquet(target_fp)
-    else:
-        return pt_df
-    return
+
+    return pt_df
 
 
 if __name__ == '__main__':

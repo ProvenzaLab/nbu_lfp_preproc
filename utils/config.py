@@ -1,9 +1,12 @@
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from datetime import datetime, timedelta
+import glob
+import pandas as pd
 
 DATALAKE = Path('Z:')
 LAB_WORLDS = Path('Y:')
+PROJECT_WORLDS = Path('X:')
 STUDY_IDS =  {'P': 'PerceptOCD-48392', 'AA': 'AA-56119', 'TRBD': 'TRBD-53761'}
 TZ = ZoneInfo("America/Chicago")
 FS = 250
@@ -35,3 +38,18 @@ def extract_consecutive_days(subpaths: list[str]) -> list[tuple[str, str]]:
         runs.append((run_start.strftime(date_format), run_end.strftime(date_format)))
 
     return runs
+
+def get_events(pt, window):
+    fps = glob.glob(f'{DATALAKE}/{STUDY_IDS[pt[:-3]]}/{pt}/NBU/{window[0]}/events/*.csv') + glob.glob(f'{DATALAKE}/{STUDY_IDS[pt[:-3]]}/{pt}/NBU/{window[1]}/events/*.csv')
+    if len(fps) == 0:
+        return pd.DataFrame()
+
+    events_df = pd.concat([pd.read_csv(fp) for fp in fps], ignore_index=True)
+    events_df.query('Event != "SESSION START" and Event != "SESSION END"', inplace=True)
+    events_df['start_dt'] = pd.to_datetime(
+        events_df['Start Date'].astype(str) + ' ' + events_df['Start Time'].astype(str)
+    ).dt.tz_localize(TZ)
+    events_df['end_dt'] = pd.to_datetime(
+        events_df['End Date'].astype(str) + ' ' + events_df['End Time'].astype(str)
+    ).dt.tz_localize(TZ)
+    return events_df
