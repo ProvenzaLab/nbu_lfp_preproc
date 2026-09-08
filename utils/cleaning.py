@@ -89,7 +89,7 @@ def stitch_selected_hours(hourly, selections):
     return stitched
 
 
-def detect_outlier_peaks(df, chs, fs, sd_threshold=10, pad_seconds=5):
+def detect_outlier_peaks(df, chs, fs, pad_seconds=5):
     """Find samples exceeding sd_threshold standard deviations (per channel, per non-NaN segment).
 
     Returns a list of candidate dicts: {channel, peak_time, win_start, win_end}.
@@ -106,8 +106,11 @@ def detect_outlier_peaks(df, chs, fs, sd_threshold=10, pad_seconds=5):
             if len(seg) < 3:
                 continue
 
-            z = zscore(seg, nan_policy='omit')
-            peaks, _ = find_peaks(np.abs(z), height=sd_threshold, distance=pad_samples)
+            # Use median absolute deviation (MAD) to detect outliers
+            mad = np.nanmedian(np.abs(seg - np.nanmedian(seg)))  
+            norm = (seg - np.nanmedian(seg)) / mad
+            iqr = np.subtract(*np.nanpercentile(norm, [75, 25]))
+            peaks, _ = find_peaks(np.abs(norm), height=20*iqr, distance=pad_samples)
 
             for p in peaks:
                 abs_idx = start + p
@@ -217,6 +220,7 @@ def save_clean_dataset(df, pt, window, hour_selections, removed_outliers):
                 'peak_time': o['peak_time'].isoformat(),
                 'win_start': o['win_start'].isoformat(),
                 'win_end': o['win_end'].isoformat(),
+                'method': o['method']
             }
             for o in removed_outliers
         ],

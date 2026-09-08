@@ -10,8 +10,9 @@ Percept LFP data for a single patient/visit window:
   2. Step through each hour of available data, comparing the PSD across the
      three methods, and pick the cleanest one for that hour.
   3. Stitch the selected hourly chunks into one clean dataset.
-  4. Flag high-amplitude artifacts (>10 SD peaks) and let the user approve or
-     reject removal of the 10s window around each.
+  4. Flag high-amplitude artifacts (MAD peaks) and let the user approve or
+     reject removal of the 10s window around each. Use template matching to remove
+     similar artifacts automatically.
   5. Review a summary of the clean data: a full spectrogram and a z-scored
      power-over-time plot, for each channel.
   6. Save the cleaned dataset and run the spectral/FOOOF/bandpower pipeline
@@ -19,16 +20,6 @@ Percept LFP data for a single patient/visit window:
 
 Run with:  streamlit run app.py   (opens http://localhost:8501)
 
-Deployment options considered for this platform:
-  - Streamlit (used here): minimal boilerplate, built-in session state,
-    good fit for a linear step-by-step wizard.
-  - Plotly Dash: more control over layout/callbacks, richer interactive
-    plots, more boilerplate for the same wizard flow.
-  - Panel (HoloViz): similar tradeoffs to Streamlit, pairs well with
-    HoloViews/Bokeh if finer plot interactivity is wanted later.
-  - Flask/FastAPI + custom HTML/JS: full control, but the wizard state
-    machine has to be hand-built; only worth it for a multi-user/remote
-    deployment.
 """
 
 import os
@@ -96,7 +87,7 @@ def finish_hour_review():
     clean_df = stitch_selected_hours(st.session_state.hourly, st.session_state.hour_selections)
     st.session_state.clean_df = clean_df
 
-    candidates = detect_outlier_peaks(clean_df, st.session_state.chs, FS, sd_threshold=10, pad_seconds=5)
+    candidates = detect_outlier_peaks(clean_df, st.session_state.chs, FS, pad_seconds=5)
     st.session_state.outlier_candidates = candidates
     st.session_state.outlier_idx = 0
     st.session_state.removed_outliers = []
@@ -128,6 +119,7 @@ def handle_outlier(remove):
             st.session_state.artifact_templates.setdefault(candidate['channel'], []).append(template)
 
         remove_outlier_window(st.session_state.clean_df, candidate['channel'], candidate['win_start'], candidate['win_end'])
+        candidate['method'] = 'manual'
         st.session_state.removed_outliers.append(candidate)
     st.session_state.outlier_idx += 1
     if st.session_state.outlier_idx >= len(st.session_state.outlier_candidates):
@@ -235,6 +227,7 @@ elif st.session_state.stage == 'outliers':
             break
 
         remove_outlier_window(st.session_state.clean_df, candidate['channel'], candidate['win_start'], candidate['win_end'])
+        candidate['method'] = 'template_match'
         st.session_state.removed_outliers.append(candidate)
         st.session_state.auto_removed.append({**candidate, 'match_score': round(score, 3)})
         st.session_state.outlier_idx += 1
