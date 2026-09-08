@@ -39,6 +39,7 @@ from utils.cleaning import (
     extract_template,
     match_template,
     save_clean_dataset,
+    save_marked_artifacts,
 )
 from utils.plotting_utils import (
     plot_hour_psd_comparison,
@@ -71,6 +72,7 @@ def init_state():
         'removed_outliers': [],
         'artifact_templates': {},
         'auto_removed': [],
+        'marked_artifacts': {},
         'events_df': pd.DataFrame(),
     }
     for key, val in defaults.items():
@@ -93,6 +95,7 @@ def finish_hour_review():
     st.session_state.removed_outliers = []
     st.session_state.artifact_templates = {}
     st.session_state.auto_removed = []
+    st.session_state.marked_artifacts = {}
     st.session_state.events_df = get_events(st.session_state.pt, st.session_state.window)
     st.session_state.stage = 'outliers' if candidates else 'summary'
 
@@ -124,6 +127,14 @@ def handle_outlier(remove):
     st.session_state.outlier_idx += 1
     if st.session_state.outlier_idx >= len(st.session_state.outlier_candidates):
         st.session_state.stage = 'summary'
+
+
+def handle_mark_artifact(note):
+    """Flag the current candidate as an important artifact (e.g. an injected
+    sync marker) with a note, without affecting the keep/remove decision."""
+    idx = st.session_state.outlier_idx
+    candidate = st.session_state.outlier_candidates[idx]
+    st.session_state.marked_artifacts[idx] = {**candidate, 'note': note}
 
 
 init_state()
@@ -246,6 +257,9 @@ elif st.session_state.stage == 'outliers':
         if st.session_state.auto_removed:
             st.write("Auto-removed via template match:")
             st.dataframe(pd.DataFrame(st.session_state.auto_removed)[['channel', 'peak_time', 'match_score']])
+        if st.session_state.marked_artifacts:
+            st.write(f"Marked as important ({len(st.session_state.marked_artifacts)}):")
+            st.dataframe(pd.DataFrame(st.session_state.marked_artifacts.values())[['channel', 'peak_time', 'note']])
         if st.button("Continue"):
             st.session_state.stage = 'summary'
             st.rerun()
@@ -262,18 +276,34 @@ elif st.session_state.stage == 'outliers':
         st.pyplot(fig)
         plt.close(fig)
 
-        col1, col2 = st.columns(2)
+        marked = st.session_state.marked_artifacts.get(idx)
+        note = st.text_input(
+            "Note (e.g. sync marker ID)",
+            value=marked['note'] if marked else '',
+            key=f"note_{idx}",
+            help="Use this to flag artifacts intentionally injected into the data "
+                 "stream (e.g. for later time-syncing) so they can be found again.",
+        )
+
+        col1, col2, col3 = st.columns(3)
         if col1.button("Keep (no artifact)", key=f"keep_{idx}"):
             handle_outlier(False)
             st.rerun()
         if col2.button("Remove (artifact)", key=f"remove_{idx}"):
             handle_outlier(True)
             st.rerun()
+        if col3.button("Mark as important", key=f"mark_{idx}"):
+            handle_mark_artifact(note)
+            st.rerun()
+
+        if marked:
+            st.success(f"Marked as important: \"{marked['note']}\"")
 
 elif st.session_state.stage == 'summary':
     st.header("4. Review clean data summary")
     st.write(f"Hours reviewed: {len(st.session_state.hour_selections)}")
     st.write(f"Artifacts removed: {len(st.session_state.removed_outliers)}")
+    st.write(f"Artifacts marked as important: {len(st.session_state.marked_artifacts)}")
 
     with st.spinner("Rendering spectrogram of clean data..."):
         spec_fig = plot_full_spectrogram(st.session_state.clean_df, st.session_state.chs, FS)
@@ -293,6 +323,7 @@ elif st.session_state.stage == 'save':
     st.header("5. Save clean dataset & compute features")
     st.write(f"Hours reviewed: {len(st.session_state.hour_selections)}")
     st.write(f"Artifacts removed: {len(st.session_state.removed_outliers)}")
+    st.write(f"Artifacts marked as important: {len(st.session_state.marked_artifacts)}")
 
     if st.button("Save clean dataset and run spectral/FOOOF pipeline"):
         with st.spinner("Saving clean dataset..."):
@@ -302,6 +333,11 @@ elif st.session_state.stage == 'save':
                 st.session_state.window,
                 st.session_state.hour_selections,
                 st.session_state.removed_outliers,
+            )
+            marked_path = save_marked_artifacts(
+                list(st.session_state.marked_artifacts.values()),
+                st.session_state.pt,
+                st.session_state.window,
             )
 
         progress_bar = st.progress(0.0)
@@ -314,6 +350,7 @@ elif st.session_state.stage == 'save':
         st.session_state.stage = 'done'
         st.session_state.parq_path = parq_path
         st.session_state.meta_path = meta_path
+        st.session_state.marked_path = marked_path
         st.rerun()
 
 elif st.session_state.stage == 'done':
@@ -321,4 +358,6 @@ elif st.session_state.stage == 'done':
     st.success("Clean dataset saved and spectral/FOOOF pipeline complete.")
     st.write(f"Clean dataset: `{st.session_state.parq_path}`")
     st.write(f"Selection metadata: `{st.session_state.meta_path}`")
+    if st.session_state.get('marked_path'):
+        st.write(f"Marked artifacts: `{st.session_state.marked_path}`")
     st.write(f"Feature files saved alongside the clean dataset as `spectra_fooof_bandpower_<channel>.pkl`.")

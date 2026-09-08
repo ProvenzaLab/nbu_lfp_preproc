@@ -229,3 +229,33 @@ def save_clean_dataset(df, pt, window, hour_selections, removed_outliers):
         json.dump(metadata, f, indent=2)
 
     return parq_path, meta_path
+
+
+def save_marked_artifacts(marked_artifacts, pt, window):
+    """Save user-flagged 'important' artifacts (e.g. injected sync markers) to
+    'marked_artifacts.json' in the same 'clean' subfolder as the clean dataset.
+
+    marked_artifacts: list of dicts with channel, peak_time, win_start, win_end, note.
+    Returns the file path, or None if there's nothing to save.
+    """
+    if not marked_artifacts:
+        return None
+
+    target_folder = LAB_WORLDS / 'Provenza' / 'NBUPipeline' / pt / window[0] / 'rawlfp' / 'clean'
+    os.makedirs(target_folder, exist_ok=True)
+    marked_path = target_folder / 'marked_artifacts.json'
+
+    data = [
+        {
+            'channel': m['channel'],
+            'peak_time': m['peak_time'].isoformat() if hasattr(m['peak_time'], 'isoformat') else str(m['peak_time']),
+            'win_start': m['win_start'].isoformat() if hasattr(m['win_start'], 'isoformat') else str(m['win_start']),
+            'win_end': m['win_end'].isoformat() if hasattr(m['win_end'], 'isoformat') else str(m['win_end']),
+            'note': m['note'],
+        }
+        for m in marked_artifacts
+    ]
+    with open(marked_path, 'w') as f:
+        json.dump(data, f, indent=2)
+
+    return marked_path
