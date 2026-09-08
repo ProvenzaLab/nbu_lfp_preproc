@@ -1,9 +1,9 @@
 # NBU LFP Preprocessing
 
-Tools for compiling, cleaning, and feature-extracting Percept LFP (local field
-potential) recordings from patients' NeuroBehavioral Unit (NBU) inpatient
-visits. The centerpiece is a local Streamlit app that walks a user through
-comparing ECG-cleaning methods, removing movement/ECG artifacts, and saving a
+Tools for compiling, cleaning, and feature-extracting streamed Percept LFP (local field
+potential) recordings from patients' NeuroBehavioral Unit (NBU) visits.
+The centerpiece is a local Streamlit app that walks a user through
+comparing ECG-cleaning methods, removing movement/other artifacts, and saving a
 clean dataset ready for spectral analysis.
 
 ## What's in this repo
@@ -49,9 +49,8 @@ clean dataset ready for spectral analysis.
 ## Prerequisites
 
 - Windows with access to the lab's mapped network drives:
-  - `Z:` — data lake (raw Percept session files, behavioral events)
-  - `Y:` — lab worlds (pipeline output: compiled/cleaned LFP data)
-  - `X:` — project worlds (per-patient time-drift correction files)
+  - datalake (raw Percept session files, behavioral events)
+  - projectworlds (pipeline output: compiled/cleaned LFP data, per-patient time-drift correction files)
 - Python **3.13+**
 - [`uv`](https://docs.astral.sh/uv/) for dependency management (a `uv.lock`
   is checked in)
@@ -67,8 +66,8 @@ clean dataset ready for spectral analysis.
    git clone <repo-url>
    cd nbu_lfp_preproc
    ```
-2. **Confirm the network drives are mapped** to `Z:`, `Y:`, and `X:` as
-   described above. Update the paths in `utils/config.py` if your lab's
+2. **Confirm the network drives are mapped** to datalake and projectworlds as
+   described above. Update the paths in `utils/config.py` if your
    drive letters differ.
 3. **Install `uv`** if you don't have it (see the [uv install docs](https://docs.astral.sh/uv/getting-started/installation/)).
 4. **Install dependencies**:
@@ -88,7 +87,7 @@ clean dataset ready for spectral analysis.
 1. Enter a **patient ID** (e.g. `P015`, `AA006`, `TRBD001`) and the visit's
    **start/end dates**, then click **Load Data**. If a method's data hasn't
    been compiled yet, it's parsed from the raw session files and cached to
-   `Y:\Provenza\NBUPipeline\<patient>\<start date>\rawlfp\<method>\`.
+   the appropriate projectworlds folder.
 2. For each available hour, compare the PSD across ECG-cleaning methods and
    pick the cleanest one, then click **Next** (or **Back** to revise a
    previous hour).
@@ -100,7 +99,7 @@ clean dataset ready for spectral analysis.
    data.
 5. Click **Save clean dataset and run spectral/FOOOF pipeline** to write the
    clean `.parq` file and selection metadata to
-   `Y:\Provenza\NBUPipeline\<patient>\<start date>\rawlfp\clean\`, and run
+   `labworlds\<study id>\<patient>\<NBU>\<compiled_LFP>\<start date>\clean\`, and run
    the spectral/FOOOF/bandpower pipeline for each channel (saved alongside
    as `spectra_fooof_bandpower_<channel>.pkl`).
 
