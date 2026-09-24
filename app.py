@@ -5,17 +5,18 @@ NBU LFP Interactive Preprocessing Platform
 A local web app that walks a user through preprocessing and artifact-cleaning
 Percept LFP data for a single patient/visit window:
 
-  1. Load LFP data for the patient/date window under all three ECG-cleaning
-     methods (raw, template, perceive).
-  2. Step through each hour of available data, comparing the PSD across the
-     three methods, and pick the cleanest one for that hour.
-  3. Stitch the selected hourly chunks into one clean dataset.
-  4. Flag high-amplitude artifacts (MAD peaks) and let the user approve or
+  1. Load the raw (non-ECG-cleaned) LFP data for the patient/date window.
+  2. Step through each hour of raw data (PSDs + the most complete 30s snippet
+     for every channel) and label it clean, unclean, or remove it.
+  3. For unclean hours, parse just that hour's session files with the template
+     and perceive ECG-cleaning methods, compare them against raw, and pick the
+     cleanest one (or remove the hour).
+  4. Stitch the selected hourly chunks into one clean dataset.
+  5. Flag high-amplitude artifacts (MAD peaks) and let the user approve or
      reject removal of the 10s window around each. Use template matching to remove
      similar artifacts automatically.
-  5. Review a summary of the clean data: a full spectrogram and a z-scored
-     power-over-time plot, for each channel.
-  6. Save the cleaned dataset and run the spectral/FOOOF/bandpower pipeline
+  6. Review a summary of the clean data: a full spectrogram for each channel.
+  7. Save the cleaned dataset and run the spectral/FOOOF/bandpower pipeline
      on it.
 
 Run with:  streamlit run app.py   (opens http://localhost:8501)
@@ -30,9 +31,11 @@ import matplotlib.pyplot as plt
 
 from utils.config import STUDY_IDS, FS, get_events
 from utils.cleaning import (
-    load_all_ecg_methods,
+    ALT_ECG_METHODS,
+    load_raw,
     group_by_hour,
-    get_available_hours,
+    load_hour_methods,
+    find_most_complete_window,
     stitch_selected_hours,
     detect_outlier_peaks,
     remove_outlier_window,
@@ -43,6 +46,7 @@ from utils.cleaning import (
 )
 from utils.plotting_utils import (
     plot_hour_psd_comparison,
+    plot_hour_raw_trace_comparison,
     plot_outlier_window,
     plot_full_spectrogram,
     plot_zscored_power_over_time,
@@ -50,6 +54,14 @@ from utils.plotting_utils import (
 import compute_spectra_fooof_bandpower as fooof_pipeline
 
 st.set_page_config(page_title="NBU LFP Preprocessing Platform", layout="wide")
+
+REMOVE_HOUR = 'removed'  # radio sentinel in the compare step: exclude this hour from the clean dataset
+# Raw-hour review uses a wide view; the ECG-method comparison zooms in where ECG
+# artifacts (low-frequency harmonics, individual heartbeats) are easiest to see.
+SNIPPET_SECONDS = 30
+PSD_MAX_FREQ = 100  # Hz
+COMPARE_SNIPPET_SECONDS = 5
+COMPARE_PSD_MAX_FREQ = 40  # Hz
 
 
 def validate_patient_id(pt):
@@ -61,10 +73,14 @@ def init_state():
         'stage': 'load',
         'pt': '',
         'window': None,
-        'hourly': None,
+        'raw_hourly': None,
+        'file_map': None,
+        'method_hours': {},
+        'stream_cache': {},
         'chs': None,
         'hours': None,
         'hour_idx': 0,
+        'hour_step': 'label',
         'hour_selections': {},
         'clean_df': None,
         'outlier_candidates': None,
@@ -86,7 +102,13 @@ def reset_state():
 
 
 def finish_hour_review():
-    clean_df = stitch_selected_hours(st.session_state.hourly, st.session_state.hour_selections)
+    clean_df = stitch_selected_hours(
+        st.session_state.raw_hourly, st.session_state.method_hours, st.session_state.hour_selections
+    )
+    if clean_df.empty:
+        st.session_state.hour_idx = len(st.session_state.hours) - 1
+        st.session_state.hour_error = "Every hour was removed — keep at least one hour to continue."
+        return
     st.session_state.clean_df = clean_df
 
     candidates = detect_outlier_peaks(clean_df, st.session_state.chs, FS, pad_seconds=5)
@@ -100,17 +122,49 @@ def finish_hour_review():
     st.session_state.stage = 'outliers' if candidates else 'summary'
 
 
-def go_next_hour(selected_method):
+def select_hour(label, method):
+    """Record the current hour's selection and move on to the next hour.
+
+    label: 'clean' | 'unclean' | 'removed'; method: the dataset to keep, or None if removed.
+    """
     hour = st.session_state.hours[st.session_state.hour_idx]
-    st.session_state.hour_selections[hour] = selected_method
+    st.session_state.hour_selections[hour] = {'label': label, 'method': method}
+    st.session_state.hour_step = 'label'
     st.session_state.hour_idx += 1
     if st.session_state.hour_idx >= len(st.session_state.hours):
         finish_hour_review()
 
 
 def go_back_hour():
-    if st.session_state.hour_idx > 0:
+    if st.session_state.hour_step == 'compare':
+        st.session_state.hour_step = 'label'
+    elif st.session_state.hour_idx > 0:
         st.session_state.hour_idx -= 1
+
+
+def describe_selection(sel):
+    if sel['label'] == 'removed':
+        return "removed"
+    return f"{sel['label']} (kept {sel['method']})"
+
+
+def render_hour_plots(hour_dfs, chs, hour, seconds=SNIPPET_SECONDS, max_freq=PSD_MAX_FREQ):
+    """PSDs (0-max_freq Hz) + the most complete `seconds`-long snippet (all channels
+    valid) for each dataset in hour_dfs, side by side so both fit on screen at once."""
+    # Only channels recorded this hour (chs spans every sensing config in the visit)
+    chs = [ch for ch in chs if hour_dfs['raw'][ch].notna().any()] or chs
+    psd_col, trace_col = st.columns(2)
+
+    with st.spinner("Rendering PSD comparison..."):
+        fig = plot_hour_psd_comparison(hour_dfs, chs, hour, FS, max_freq=max_freq)
+    psd_col.pyplot(fig)
+    plt.close(fig)
+
+    with st.spinner("Rendering time-domain snippet..."):
+        t0 = find_most_complete_window(hour_dfs['raw'], chs, seconds=seconds)
+        fig = plot_hour_raw_trace_comparison(hour_dfs, chs, t0, FS, seconds=seconds)
+    trace_col.pyplot(fig)
+    plt.close(fig)
 
 
 def handle_outlier(remove):
@@ -159,27 +213,30 @@ if st.session_state.stage == 'load':
             st.error(f"Unrecognized patient ID prefix. Must start with one of {list(STUDY_IDS.keys())}.")
         else:
             window = (start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d"))
-            with st.spinner("Loading raw / template / perceive LFP data..."):
-                
-                dfs = load_all_ecg_methods(pt, window)
+            with st.spinner("Loading raw LFP data..."):
+                raw_df, file_map = load_raw(pt, window)
 
-            if not dfs:
-                st.error("No LFP data found for any ECG method in that window.")
+            if raw_df is None or raw_df.empty:
+                st.error("No raw LFP data found in that window.")
             else:
-                chs = [c for c in next(iter(dfs.values())).columns if 'LEFT' in c or 'RIGHT' in c]
+                chs = [c for c in raw_df.columns if 'LEFT' in c or 'RIGHT' in c]
                 with st.spinner("Indexing data by hour..."):
-                    hourly = group_by_hour(dfs)
-                hours = get_available_hours(hourly)
+                    raw_hourly = group_by_hour(raw_df)
+                hours = sorted(raw_hourly)
 
                 if not hours:
                     st.error("No hourly data available to review.")
                 else:
                     st.session_state.pt = pt
                     st.session_state.window = window
-                    st.session_state.hourly = hourly
+                    st.session_state.raw_hourly = raw_hourly
+                    st.session_state.file_map = file_map
+                    st.session_state.method_hours = {}
+                    st.session_state.stream_cache = {}
                     st.session_state.chs = chs
                     st.session_state.hours = hours
                     st.session_state.hour_idx = 0
+                    st.session_state.hour_step = 'label'
                     st.session_state.hour_selections = {}
                     st.session_state.stage = 'hours'
                     st.rerun()
@@ -188,34 +245,77 @@ elif st.session_state.stage == 'hours':
     hours = st.session_state.hours
     idx = st.session_state.hour_idx
     hour = hours[idx]
+    chs = st.session_state.chs
+    raw_hour_df = st.session_state.raw_hourly[hour]
+    prev = st.session_state.hour_selections.get(hour)
+    step = st.session_state.hour_step
 
-    st.header("2. Compare hourly PSDs")
-    st.progress((idx) / len(hours))
+    st.header("2. Review hourly data")
+    st.progress(idx / len(hours))
     st.subheader(f"Hour {idx + 1} of {len(hours)}: {hour}")
 
-    available_methods = [m for m, h in st.session_state.hourly.items() if hour in h]
-    hour_dfs = {m: st.session_state.hourly[m][hour] for m in available_methods}
+    hour_error = st.session_state.pop('hour_error', None)
+    if hour_error:
+        st.error(hour_error)
+    if prev:
+        st.caption(f"Previously marked: {describe_selection(prev)}")
 
-    with st.spinner("Rendering PSD comparison..."):
-        fig = plot_hour_psd_comparison(hour_dfs, st.session_state.chs, hour, FS)
-    st.pyplot(fig)
-    plt.close(fig)
+    if step == 'label':
+        render_hour_plots({'raw': raw_hour_df}, chs, hour)
 
-    default_method = st.session_state.hour_selections.get(hour, available_methods[0])
-    selected_method = st.radio(
-        "Cleanest method for this hour (applied to all channels)",
-        available_methods,
-        index=available_methods.index(default_method) if default_method in available_methods else 0,
-        key=f"method_radio_{idx}",
-    )
+        st.write("Is the raw data for this hour clean?")
+        col1, col2, col3, col4 = st.columns(4)
+        if col1.button("Back", disabled=(idx == 0), key=f"back_label_{idx}"):
+            go_back_hour()
+            st.rerun()
+        if col2.button("Clean (keep raw)", key=f"clean_{idx}"):
+            select_hour('clean', 'raw')
+            st.rerun()
+        if col3.button("Unclean (compare ECG methods)", key=f"unclean_{idx}"):
+            st.session_state.hour_step = 'compare'
+            st.rerun()
+        if col4.button("Remove hour", key=f"remove_hour_{idx}"):
+            select_hour('removed', None)
+            st.rerun()
 
-    col1, col2 = st.columns(2)
-    if col1.button("Back", disabled=(idx == 0), key=f"back_{idx}"):
-        go_back_hour()
-        st.rerun()
-    if col2.button("Next", key=f"next_{idx}"):
-        go_next_hour(selected_method)
-        st.rerun()
+    else:
+        if hour not in st.session_state.method_hours:
+            with st.spinner(f"Parsing this hour with {' / '.join(ALT_ECG_METHODS)} ECG cleaning..."):
+                st.session_state.method_hours[hour] = load_hour_methods(
+                    st.session_state.pt, hour, raw_hour_df, st.session_state.file_map, st.session_state.stream_cache
+                )
+        hour_dfs = {'raw': raw_hour_df, **st.session_state.method_hours[hour]}
+
+        missing = [m for m in ALT_ECG_METHODS if m not in hour_dfs]
+        if missing:
+            st.warning(f"No {' / '.join(missing)} data could be loaded for this hour.")
+
+        render_hour_plots(hour_dfs, chs, hour,
+                          seconds=COMPARE_SNIPPET_SECONDS, max_freq=COMPARE_PSD_MAX_FREQ)
+
+        radio_options = list(hour_dfs) + [REMOVE_HOUR]
+        if prev is None or prev['label'] == 'clean':
+            default = radio_options[0]
+        else:
+            default = prev['method'] or REMOVE_HOUR
+        selected = st.radio(
+            "Dataset to keep for this hour (applied to all channels)",
+            radio_options,
+            index=radio_options.index(default) if default in radio_options else 0,
+            format_func=lambda m: "Remove this hour (exclude from dataset)" if m == REMOVE_HOUR else m,
+            key=f"method_radio_{idx}",
+        )
+
+        col1, col2 = st.columns(2)
+        if col1.button("Back", key=f"back_compare_{idx}"):
+            go_back_hour()
+            st.rerun()
+        if col2.button("Next", key=f"next_{idx}"):
+            if selected == REMOVE_HOUR:
+                select_hour('removed', None)
+            else:
+                select_hour('unclean', selected)
+            st.rerun()
 
 elif st.session_state.stage == 'outliers':
     threshold = st.sidebar.slider(
@@ -271,7 +371,7 @@ elif st.session_state.stage == 'outliers':
 
         with st.spinner("Rendering candidate window..."):
             fig = plot_outlier_window(
-                st.session_state.clean_df, candidate['channel'], candidate['win_start'], candidate['win_end'], events_df
+                st.session_state.clean_df, candidate['channel'], candidate['win_start'], candidate['win_end'], events_df, FS
             )
         st.pyplot(fig)
         plt.close(fig)
@@ -310,11 +410,6 @@ elif st.session_state.stage == 'summary':
     st.pyplot(spec_fig)
     plt.close(spec_fig)
 
-    with st.spinner("Rendering z-scored power over time..."):
-        power_fig = plot_zscored_power_over_time(st.session_state.clean_df, st.session_state.chs, FS)
-    st.pyplot(power_fig)
-    plt.close(power_fig)
-
     if st.button("Continue to save"):
         st.session_state.stage = 'save'
         st.rerun()
@@ -344,7 +439,7 @@ elif st.session_state.stage == 'save':
         chs = st.session_state.chs
         for i, ch in enumerate(chs):
             with st.spinner(f"Running FOOOF/bandpower pipeline for {ch}..."):
-                fooof_pipeline.run_pipeline(str(parq_path), ch)
+                fooof_pipeline.run_pipeline(parq_path, ch)
             progress_bar.progress((i + 1) / len(chs))
 
         st.session_state.stage = 'done'

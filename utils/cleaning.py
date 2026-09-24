@@ -5,79 +5,151 @@ import pandas as pd
 from scipy.stats import zscore
 from scipy.signal import find_peaks
 from joblib import Parallel, delayed
+from percept_parser.percept import PerceptParser
 
-from compile_timedomain import read_lfp_data
+from compile_timedomain import read_lfp_data, get_file_map, parse_session_file, load_drift_df, finalize_lfp_df
 from utils.utils import find_non_nan_segments
-from utils.config import LAB_WORLDS
+from utils.config import PROJECT_WORLDS, STUDY_IDS
 
-ECG_METHODS = {None: 'raw', 'template': 'template', 'perceive': 'perceive'}
+ALT_ECG_METHODS = ('template', 'perceive')  # ECG-cleaning methods parsed on demand for unclean hours
 
 
-def load_all_ecg_methods(pt, window):
-    """Load LFP data for a patient/visit window under all three ECG-cleaning methods.
+def load_raw(pt, window):
+    """Load the raw (non-ECG-cleaned) LFP data for a patient/visit window.
 
-    Returns {'raw': df, 'template': df, 'perceive': df}, omitting methods with no data.
-    Methods whose compiled parquet already exists are read straight from disk instead
-    of being re-parsed from the raw session files.
+    Reads the compiled parquet if it already exists, otherwise parses the raw
+    session files (and caches the result to disk).
+
+    Returns (raw_df, file_map); raw_df is None if there's no data. file_map maps
+    (ipg_hemisphere, filename) -> session file path, used to re-parse an hour's
+    files with the other ECG methods.
     """
-    target_folder = LAB_WORLDS / 'Provenza' / 'NBUPipeline' / pt / window[0] / 'rawlfp'
-    dfs = {}
-    missing_methods = []
+    study_id = STUDY_IDS[pt[:-3]]
+    fp = PROJECT_WORLDS / study_id / pt / 'NBU' / f'{window[0]}_{window[1]}' / 'LFP' / 'raw' / f'{pt}_{window[0]}-{window[1]}_timedomain_LFP.parq'
+    if os.path.exists(fp):
+        df = pd.read_parquet(fp)
+    else:
+        df = read_lfp_data(pt, window=window, ecg_method=None, save=True)
 
-    for method in ECG_METHODS:
-        fp = target_folder / ECG_METHODS[method] / f'{pt}_{window[0]}-{window[1]}_timedomain_LFP.parq'
-        if os.path.exists(fp):
-            dfs[ECG_METHODS[method]] = pd.read_parquet(fp)
-        else:
-            missing_methods.append(method)
-
-    if missing_methods:
-        results = Parallel(n_jobs=len(missing_methods))(
-            delayed(read_lfp_data)(pt, window=window, ecg_method=m, save=True) for m in missing_methods
-        )
-        for method, df in zip(missing_methods, results):
-            label = ECG_METHODS[method]
-            if df is not None and not df.empty:
-                dfs[label] = df
-
-    return dfs
+    return df, get_file_map(pt)
 
 
-def group_by_hour(dfs):
-    """Pre-slice each method's dataframe by hour once.
+def group_by_hour(df):
+    """Pre-slice a dataframe by hour once.
 
     Re-filtering the full multi-day dataframe on every Next/Back click (via
     `df['CT_times'].dt.floor('h') == hour`) is what made the wizard slow —
-    that scan re-runs over the entire dataset, for every method, on every
-    click. Doing it once up front turns each hour transition into an O(1)
-    dict lookup instead.
+    that scan re-runs over the entire dataset on every click. Doing it once up
+    front turns each hour transition into an O(1) dict lookup instead.
 
-    Returns {method: {hour: hour_df}}.
+    Returns {hour: hour_df}.
     """
-    grouped = {}
-    for method, df in dfs.items():
-        if df is None or df.empty:
+    return {hour: sub_df.sort_index() for hour, sub_df in df.groupby(df['CT_times'].dt.floor('h'))}
+
+
+def _parse_file_for_window(path, ecg_method, time_window, stream_cache):
+    """Parse one session file's packages overlapping time_window; returns (chunks, newly parsed packages)."""
+    parser = PerceptParser(path, ecg_method=ecg_method)
+    cached = set(stream_cache)
+    chunks = parse_session_file(parser, time_window=time_window, stream_cache=stream_cache)
+    return chunks, {k: v for k, v in stream_cache.items() if k not in cached}
+
+
+def load_hour_methods(pt, hour, raw_hour_df, file_map, stream_cache, methods=ALT_ECG_METHODS):
+    """Parse a single hour of data under the other ECG-cleaning methods.
+
+    Only the session files that contribute to this hour of raw data are
+    re-parsed, and only their streaming packages overlapping the hour are
+    reconstructed and ECG-cleaned (see compile_timedomain.read_timedomain_window).
+
+    stream_cache: {(ipg_hemisphere, filename, method): {package key: cleaned df}},
+        updated in place; keep it across calls so neighboring hours reuse work.
+    Returns {method: hour_df}, omitting methods with no data.
+    """
+    files = raw_hour_df[['ipg_hemisphere', 'filename']].drop_duplicates()
+    drift_df = load_drift_df(pt, files['filename'].unique())
+    margin = pd.Timedelta(minutes=1)
+
+    tasks = []
+    for hem, fname in files.itertuples(index=False):
+        path = file_map.get((hem, fname))
+        if path is None:
+            print(f'Session file {hem}/{fname} not found, skipping.')
             continue
-        grouped[method] = {hour: sub_df for hour, sub_df in df.groupby(df['CT_times'].dt.floor('h'))}
-    return grouped
+
+        # finalize_lfp_df shifts this file's timestamps back by its manual drift
+        # correction, so the hour sits that much later in the parser's time.
+        shift = pd.Timedelta(seconds=drift_df.loc[drift_df['filename'] == fname, 'time_drift_seconds'].sum())
+        time_window = (hour + shift - margin, hour + pd.Timedelta(hours=1) + shift + margin)
+        for method in methods:
+            tasks.append(((hem, fname, method), path, time_window))
+
+    if not tasks:
+        return {}
+
+    results = Parallel(n_jobs=len(tasks))(
+        delayed(_parse_file_for_window)(path, key[2], time_window, stream_cache.get(key, {}))
+        for key, path, time_window in tasks
+    )
+
+    chunks_by_method = {m: [] for m in methods}
+    for (key, _, _), (chunks, new_streams) in zip(tasks, results):
+        stream_cache.setdefault(key, {}).update(new_streams)
+        chunks_by_method[key[2]].extend(chunks)
+
+    hour_dfs = {}
+    for method, chunks in chunks_by_method.items():
+        if not chunks:
+            continue
+        df = finalize_lfp_df(pt, chunks)
+        df = df[df['CT_times'].dt.floor('h') == hour].sort_index()
+        # Match the raw data's columns: channels recorded elsewhere in the visit
+        # but not in this hour's packages would otherwise be missing.
+        df = df.reindex(columns=raw_hour_df.columns)
+        if not df.empty:
+            hour_dfs[method] = df
+    return hour_dfs
 
 
-def get_available_hours(hourly):
-    hours = set()
-    for hour_dict in hourly.values():
-        hours.update(hour_dict.keys())
-    return sorted(hours)
+def find_most_complete_window(df, chs, seconds=30, step_seconds=1):
+    """Start time of the `seconds`-long window with the most samples where every streaming channel is valid.
+
+    `chs` spans every sensing configuration in the visit, so some channels can
+    have no data in a given hour; a sample counts as valid when it has the most
+    simultaneously valid channels seen in the hour. Slides the window in
+    `step_seconds` steps; ties go to the earliest window, and the start is
+    snapped forward to the first valid sample.
+    """
+    times = df['CT_times']
+    n_valid = df[chs].apply(pd.to_numeric, errors='coerce').notna().sum(axis=1).to_numpy()
+    valid = (n_valid == n_valid.max()) & (n_valid > 0) if len(n_valid) else n_valid.astype(bool)
+    t0 = times.min()
+    rel = (times - t0).dt.total_seconds().to_numpy()
+
+    valid_t = np.sort(rel[valid])
+    if valid_t.size == 0:
+        return t0
+
+    starts = np.arange(0, max(rel.max() - seconds, 0) + step_seconds, step_seconds)
+    counts = np.searchsorted(valid_t, starts + seconds) - np.searchsorted(valid_t, starts)
+    best = valid_t[np.searchsorted(valid_t, starts[np.argmax(counts)])]
+    return t0 + pd.Timedelta(seconds=best)
 
 
-def stitch_selected_hours(hourly, selections):
-    """Concatenate the user-selected method's data for each hour into one clean dataframe.
+def stitch_selected_hours(raw_hourly, method_hours, selections):
+    """Concatenate the user-selected data for each hour into one clean dataframe.
 
-    hourly: {method: {hour: hour_df}}, as returned by group_by_hour.
-    selections: dict mapping hour (Timestamp) -> method label (e.g. 'raw', 'template', 'perceive')
+    raw_hourly: {hour: raw hour_df}, as returned by group_by_hour.
+    method_hours: {hour: {method: hour_df}}, as returned by load_hour_methods.
+    selections: {hour: {'label': 'clean'|'unclean'|'removed', 'method': 'raw'|'template'|'perceive'|None}};
+        hours with method None are excluded.
     """
     chunks = []
-    for hour, method in selections.items():
-        chunk = hourly.get(method, {}).get(hour)
+    for hour, sel in selections.items():
+        method = sel['method']
+        if method is None:
+            continue
+        chunk = raw_hourly.get(hour) if method == 'raw' else method_hours.get(hour, {}).get(method)
         if chunk is not None and not chunk.empty:
             chunks.append(chunk)
 
@@ -198,12 +270,12 @@ def match_template(window, templates, max_lag=20):
 
 def save_clean_dataset(df, pt, window, hour_selections, removed_outliers):
     """Save the stitched, artifact-cleaned dataset + selection metadata to the 'clean' subfolder."""
-    target_folder = LAB_WORLDS / 'Provenza' / 'NBUPipeline' / pt / window[0] / 'rawlfp' / 'clean'
+    study_id = STUDY_IDS[pt[:-3]]
+    target_folder = PROJECT_WORLDS / study_id / pt / 'NBU' / f'{window[0]}_{window[1]}' / 'LFP' / 'clean'
     os.makedirs(target_folder, exist_ok=True)
 
-    base_name = f'{pt}_{window[0]}-{window[1]}'
-    parq_path = target_folder / f'{base_name}_timedomain_LFP.parq'
-    meta_path = target_folder / f'{base_name}_clean_metadata.json'
+    parq_path = target_folder / 'timedomain_LFP.parq'
+    meta_path = target_folder / 'clean_metadata.json'
 
     df.to_parquet(parq_path)
 
@@ -241,7 +313,8 @@ def save_marked_artifacts(marked_artifacts, pt, window):
     if not marked_artifacts:
         return None
 
-    target_folder = LAB_WORLDS / 'Provenza' / 'NBUPipeline' / pt / window[0] / 'rawlfp' / 'clean'
+    study_id = STUDY_IDS[pt[:-3]]
+    target_folder = PROJECT_WORLDS / study_id / pt / 'NBU' / f'{window[0]}_{window[1]}' / 'LFP' / 'clean'
     os.makedirs(target_folder, exist_ok=True)
     marked_path = target_folder / 'marked_artifacts.json'
 

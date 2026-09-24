@@ -10,24 +10,27 @@ clean dataset ready for spectral analysis.
 
 - **`app.py`** — the interactive preprocessing platform (Streamlit web app).
   For a single patient/visit window, it:
-  1. Loads LFP data under all three ECG-cleaning methods (`raw`, `template`,
-     `perceive`).
-  2. Steps through each hour of available data, comparing the PSD across the
-     three methods, and lets the user pick the cleanest one for that hour.
-  3. Stitches the selected hourly chunks into one dataset.
-  4. Flags high-amplitude artifacts (MAD-based peak detection) for manual
+  1. Loads the raw (non-ECG-cleaned) LFP data.
+  2. Steps through each hour of raw data (PSDs + the most complete 30s snippet
+     across all channels) and lets the user label it clean, unclean, or remove it.
+  3. For unclean hours, parses just that hour's session files with the
+     `template` and `perceive` ECG-cleaning methods, shows them next to raw,
+     and lets the user pick the cleanest one (or remove the hour).
+  4. Stitches the selected hourly chunks into one dataset.
+  5. Flags high-amplitude artifacts (MAD-based peak detection) for manual
      keep/remove review, and auto-removes further candidates that match a
      saved artifact template via cross-correlation.
-  5. Shows a summary of the clean data (full spectrogram + z-scored power
+  6. Shows a summary of the clean data (full spectrogram + z-scored power
      over time per channel).
-  6. Saves the clean dataset and metadata, then runs the spectral/FOOOF/
+  7. Saves the clean dataset and metadata, then runs the spectral/FOOOF/
      bandpower pipeline on it.
 - **`compile_timedomain.py`** — parses raw Percept `.json` session files
   (via [`perceptparser`](https://github.com/ProvenzaLab/perceptparser)) into
-  a single time-indexed dataframe per patient/visit/ECG-method, merges in
-  stimulation settings, corrects tablet time drift, and writes the result to
-  a `.parq` file. Can be run standalone to batch-compile all NBU visits for a
-  study, or called on demand by the app.
+  a single time-indexed dataframe per patient/visit, merges in stimulation
+  settings, corrects tablet time drift, and writes the result to a `.parq`
+  file. Can be run standalone to batch-compile the raw data for all NBU
+  visits of a study, or called on demand by the app. Its per-file helpers are
+  also used by the app to parse single hours with ECG cleaning.
 - **`compute_spectra_fooof_bandpower.py`** — computes windowed PSDs
   (Welch's method), decomposes them into aperiodic/periodic components with
   [`specparam`](https://github.com/fooof-tools/fooof) (FOOOF), and derives
@@ -85,12 +88,15 @@ clean dataset ready for spectral analysis.
 ## Using the app
 
 1. Enter a **patient ID** (e.g. `P015`, `AA006`, `TRBD001`) and the visit's
-   **start/end dates**, then click **Load Data**. If a method's data hasn't
+   **start/end dates**, then click **Load Data**. If the raw data hasn't
    been compiled yet, it's parsed from the raw session files and cached to
    the appropriate projectworlds folder.
-2. For each available hour, compare the PSD across ECG-cleaning methods and
-   pick the cleanest one, then click **Next** (or **Back** to revise a
-   previous hour).
+2. For each available hour, check the raw PSDs and 30s snippet and click
+   **Clean** (keep raw), **Unclean**, or **Remove hour**. **Unclean** parses
+   that hour with the `template` and `perceive` ECG-cleaning methods (only the
+   session files/streams covering the hour) and shows them next to raw; pick
+   the one to keep (or remove the hour) and click **Next**. **Back** revises
+   a previous step; already-parsed hours are cached for the session.
 3. Review each flagged high-amplitude candidate window and click **Keep** or
    **Remove**. Removing a candidate saves its waveform as a template; later
    candidates on the same channel that correlate above the sidebar

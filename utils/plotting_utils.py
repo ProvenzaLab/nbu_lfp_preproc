@@ -140,9 +140,9 @@ def plot_lfp_spectrogram(lfp_df, ch, fs, nperseg, max_freq, ax):
 
     return ax
 
-def plot_hour_psd_comparison(hour_dfs_by_method, chs, hour, fs, nperseg=1000):
+def plot_hour_psd_comparison(hour_dfs_by_method, chs, hour, fs, nperseg=1000, max_freq=100, width=5, row_height=2.5):
     """
-    Compare the PSD (0-30 Hz) of each channel for a single hour across ECG-cleaning methods.
+    Compare the PSD (0-max_freq Hz) of each channel for a single hour across ECG-cleaning methods.
 
     Parameters
     ----------
@@ -158,6 +158,11 @@ def plot_hour_psd_comparison(hour_dfs_by_method, chs, hour, fs, nperseg=1000):
         Sampling frequency in Hz.
     nperseg : int, optional
         Welch segment length, capped to the available samples for that hour.
+    max_freq : float, optional
+        Upper frequency limit (Hz) of the plotted PSD.
+    width, row_height : float, optional
+        Figure width and height per channel row (inches), kept compact so the app
+        can show the PSD and trace figures side by side without scrolling.
 
     Returns
     -------
@@ -168,7 +173,7 @@ def plot_hour_psd_comparison(hour_dfs_by_method, chs, hour, fs, nperseg=1000):
         raise ValueError(f"No data available for hour {hour}")
 
     n_rows, n_cols = len(chs), len(methods)
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 4 * n_rows), squeeze=False)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(width, row_height * n_rows), sharex=True, squeeze=False)
 
     for col, method in enumerate(methods):
         hour_df = hour_dfs_by_method[method]
@@ -177,22 +182,77 @@ def plot_hour_psd_comparison(hour_dfs_by_method, chs, hour, fs, nperseg=1000):
             ax = axes[row, col]
             signal_vals = pd.to_numeric(hour_df[ch], errors='coerce').dropna().to_numpy()
 
+            ax.tick_params(labelsize=7)
             if len(signal_vals) < 2:
-                ax.set_title(f'{method} - {ch}\n(no data)')
+                ax.set_title(f'{method} - {ch} (no data)', fontsize=8)
                 ax.axis('off')
                 continue
 
             seg_len = min(nperseg, len(signal_vals))
             freqs, psd = welch(signal_vals, fs=fs, nperseg=seg_len)
-            mask = (freqs >= 0) & (freqs <= 30)
+            mask = (freqs >= 0) & (freqs <= max_freq)
 
-            ax.semilogy(freqs[mask], psd[mask], linewidth=1.2)
-            ax.set_title(f'{method} - {ch}')
-            ax.set_xlabel('Frequency (Hz)')
-            ax.set_ylabel('PSD')
+            ax.semilogy(freqs[mask], psd[mask], linewidth=1.0)
+            ax.set_title(f'{method} - {ch}', fontsize=8)
+            if row == n_rows - 1:
+                ax.set_xlabel('Frequency (Hz)', fontsize=7)
+            if col == 0:
+                ax.set_ylabel('PSD', fontsize=7)
             ax.grid(True, which='both', linestyle='--', linewidth=0.5, alpha=0.6)
 
-    fig.suptitle(f'Hourly PSD comparison — {hour}')
+    fig.suptitle(f'Hourly PSD — {hour}', fontsize=9)
+    fig.tight_layout()
+    return fig
+
+def plot_hour_raw_trace_comparison(hour_dfs_by_method, chs, t0, fs, seconds=30, width=10, row_height=5):
+    """
+    Plot the same `seconds`-long time-domain snippet from a single hour for each
+    ECG-cleaning method, so the traces can be compared alongside the PSDs.
+
+    t0 : pd.Timestamp
+        Snippet start (e.g. from utils.cleaning.find_most_complete_window); the same
+        time range is used for every method.
+    width, row_height : float, optional
+        Figure width and height per channel row (inches).
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+    """
+    methods = [m for m, df in hour_dfs_by_method.items() if df is not None and not df.empty]
+    if not methods:
+        raise ValueError(f"No data available for snippet starting {t0}")
+
+    t1 = t0 + pd.Timedelta(seconds=seconds)
+
+    n_rows, n_cols = len(chs), len(methods)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(width, row_height * n_rows),
+                             sharex=True, sharey='row', squeeze=False)
+
+    for col, method in enumerate(methods):
+        hour_df = hour_dfs_by_method[method]
+        snippet = hour_df[(hour_df['CT_times'] >= t0) & (hour_df['CT_times'] < t1)]
+        elapsed = (snippet['CT_times'] - t0).dt.total_seconds().to_numpy()
+
+        for row, ch in enumerate(chs):
+            ax = axes[row, col]
+            signal_vals = pd.to_numeric(snippet[ch], errors='coerce').to_numpy()
+
+            ax.tick_params(labelsize=7)
+            if np.all(np.isnan(signal_vals)):
+                ax.set_title(f'{method} - {ch} (no data)', fontsize=8)
+                continue
+
+            ax.plot(elapsed, signal_vals, linewidth=0.5)
+            ax.set_title(f'{method} - {ch}', fontsize=8)
+            ax.set_xlim(0, seconds)
+            if col == 0:
+                ax.set_ylabel('Signal', fontsize=7)
+
+    for ax in axes[-1, :]:
+        ax.set_xlabel('Time (s)', fontsize=7)
+
+    fig.suptitle(f'{seconds}s snippet — starting {t0}', fontsize=9)
     fig.tight_layout()
     return fig
 
@@ -254,14 +314,15 @@ def plot_zscored_power_over_time(df, chs, fs, window_seconds=60):
     return fig
 
 
-def plot_outlier_window(df, channel, win_start, win_end, events_df):
+def plot_outlier_window(df, channel, win_start, win_end, events_df, fs, nperseg=1000):
     """
     Plot the time-series signal in a candidate artifact window for a single channel,
-    for the user to review during artifact-removal.
+    alongside the PSD (0-30 Hz) of that same window, for the user to review during
+    artifact-removal.
     """
     window_df = df.loc[win_start:win_end]
 
-    fig, ax = plt.subplots(1, 1, figsize=(10, 4))
+    fig, (ax, psd_ax) = plt.subplots(1, 2, figsize=(15, 4), gridspec_kw={'width_ratios': [2, 1]})
     ax.plot(window_df['CT_times'], window_df[channel], linewidth=1.0)
     events = events_df.query('start_dt <= @win_end and end_dt >= @win_start') if not events_df.empty else pd.DataFrame()
     for _, event in events.iterrows():
@@ -274,6 +335,20 @@ def plot_outlier_window(df, channel, win_start, win_end, events_df):
     ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S', tz='America/Chicago'))
     if not events.empty:
         ax.legend(loc='upper right', fontsize='small')
+
+    signal_vals = pd.to_numeric(window_df[channel], errors='coerce').dropna().to_numpy()
+    if len(signal_vals) < 2:
+        psd_ax.set_title('PSD (no data)')
+        psd_ax.axis('off')
+    else:
+        freqs, psd = welch(signal_vals, fs=fs, nperseg=min(nperseg, len(signal_vals)))
+        mask = (freqs >= 0) & (freqs <= 30)
+        psd_ax.semilogy(freqs[mask], psd[mask], linewidth=1.2)
+        psd_ax.set_title(f'{channel} — PSD of window')
+        psd_ax.set_xlabel('Frequency (Hz)')
+        psd_ax.set_ylabel('PSD')
+        psd_ax.grid(True, which='both', linestyle='--', linewidth=0.5, alpha=0.6)
     fig.tight_layout()
+    return fig
 
     return fig
