@@ -5,7 +5,9 @@ NBU LFP Interactive Preprocessing Platform
 A local web app that walks a user through preprocessing and artifact-cleaning
 Percept LFP data for a single patient/visit window:
 
-  1. Load the raw (non-ECG-cleaned) LFP data for the patient/date window.
+  1. Load the raw (non-ECG-cleaned) LFP data for the patient/date window, or
+     queue every raw LFP file for the patient (bulk mode) and run steps 2-7
+     on each visit in turn.
   2. Step through each hour of raw data (PSDs + the most complete 30s snippet
      for every channel) and label it clean, unclean, or remove it.
   3. For unclean hours, parse just that hour's session files with the template
@@ -32,6 +34,8 @@ import matplotlib.pyplot as plt
 from utils.config import STUDY_IDS, FS, get_events
 from utils.cleaning import (
     ALT_ECG_METHODS,
+    find_raw_visits,
+    clean_dataset_exists,
     load_raw,
     group_by_hour,
     load_hour_methods,
@@ -90,6 +94,9 @@ def init_state():
         'auto_removed': [],
         'marked_artifacts': {},
         'events_df': pd.DataFrame(),
+        'bulk_queue': [],  # [(window, raw parquet path)] in bulk mode; empty for a single date range
+        'bulk_idx': 0,     # number of bulk_queue entries started so far
+        'bulk_log': [],    # per-visit outcome shown at the end of a bulk run
     }
     for key, val in defaults.items():
         st.session_state.setdefault(key, val)
@@ -101,7 +108,62 @@ def reset_state():
     init_state()
 
 
+def start_visit(pt, window, raw_fp=None):
+    """Load a visit's raw data and move to the hourly review. Returns an error
+    message, or None on success."""
+    with st.spinner(f"Loading raw LFP data for {window[0]} to {window[1]}..."):
+        raw_df, file_map = load_raw(pt, window, fp=raw_fp)
+
+    if raw_df is None or raw_df.empty:
+        return "No raw LFP data found in that window."
+
+    chs = [c for c in raw_df.columns if 'LEFT' in c or 'RIGHT' in c]
+    with st.spinner("Indexing data by hour..."):
+        raw_hourly = group_by_hour(raw_df)
+    hours = sorted(raw_hourly)
+    if not hours:
+        return "No hourly data available to review."
+
+    st.session_state.pt = pt
+    st.session_state.window = window
+    st.session_state.raw_hourly = raw_hourly
+    st.session_state.file_map = file_map
+    st.session_state.method_hours = {}
+    st.session_state.stream_cache = {}
+    st.session_state.chs = chs
+    st.session_state.hours = hours
+    st.session_state.hour_idx = 0
+    st.session_state.hour_step = 'label'
+    st.session_state.hour_selections = {}
+    st.session_state.stage = 'hours'
+    return None
+
+
+def log_bulk(window, status):
+    st.session_state.bulk_log.append({'visit': f'{window[0]} to {window[1]}', 'status': status})
+
+
+def advance_bulk():
+    """Load the next visit in the bulk queue that has data, logging any that
+    fail to load; ends the run once the queue is exhausted."""
+    queue = st.session_state.bulk_queue
+    while st.session_state.bulk_idx < len(queue):
+        window, fp = queue[st.session_state.bulk_idx]
+        st.session_state.bulk_idx += 1
+        try:
+            error = start_visit(st.session_state.pt, window, raw_fp=fp)
+        except Exception as e:  # one unreadable file shouldn't end the whole run
+            error = f"Failed to load {fp}: {e}"
+        if error is None:
+            return
+        log_bulk(window, f"skipped: {error}")
+    st.session_state.stage = 'bulk_done'
+
+
 def finish_hour_review():
+    """Stitch the selected hours and set up the artifact review, writing each
+    step into the enclosing st.status box."""
+    st.write("Stitching selected hours into one dataset...")
     clean_df = stitch_selected_hours(
         st.session_state.raw_hourly, st.session_state.method_hours, st.session_state.hour_selections
     )
@@ -111,6 +173,7 @@ def finish_hour_review():
         return
     st.session_state.clean_df = clean_df
 
+    st.write("Detecting candidate artifacts...")
     candidates = detect_outlier_peaks(clean_df, st.session_state.chs, FS, pad_seconds=5)
     st.session_state.outlier_candidates = candidates
     st.session_state.outlier_idx = 0
@@ -118,6 +181,7 @@ def finish_hour_review():
     st.session_state.artifact_templates = {}
     st.session_state.auto_removed = []
     st.session_state.marked_artifacts = {}
+    st.write("Loading session events...")
     st.session_state.events_df = get_events(st.session_state.pt, st.session_state.window)
     st.session_state.stage = 'outliers' if candidates else 'summary'
 
@@ -131,8 +195,6 @@ def select_hour(label, method):
     st.session_state.hour_selections[hour] = {'label': label, 'method': method}
     st.session_state.hour_step = 'label'
     st.session_state.hour_idx += 1
-    if st.session_state.hour_idx >= len(st.session_state.hours):
-        finish_hour_review()
 
 
 def go_back_hour():
@@ -195,6 +257,17 @@ init_state()
 st.title("NBU LFP Preprocessing Platform")
 st.sidebar.button("Start over", on_click=reset_state)
 
+if st.session_state.bulk_queue and st.session_state.stage not in ('load', 'bulk_done'):
+    queue = st.session_state.bulk_queue
+    window = st.session_state.window
+    st.sidebar.divider()
+    st.sidebar.write(f"**Bulk run: visit {st.session_state.bulk_idx} of {len(queue)}**")
+    st.sidebar.caption(f"{window[0]} to {window[1]}")
+    if st.session_state.stage != 'done' and st.sidebar.button("Skip this visit"):
+        log_bulk(window, "skipped by user")
+        advance_bulk()
+        st.rerun()
+
 st.sidebar.divider()
 if st.sidebar.button("Shut down app"):
     st.sidebar.warning("Shutting down — close this browser tab.")
@@ -204,118 +277,144 @@ if st.session_state.stage == 'load':
     st.header("1. Load visit data")
 
     pt = st.text_input("Patient ID (e.g. P015, AA006, TRBD001)", value=st.session_state.pt)
-    col1, col2 = st.columns(2)
-    start_date = col1.date_input("Start date")
-    end_date = col2.date_input("End date")
+    mode = st.radio("Data to preprocess", ["Date range", "All visits (bulk)"], horizontal=True)
 
-    if st.button("Load Data"):
-        if not validate_patient_id(pt):
-            st.error(f"Unrecognized patient ID prefix. Must start with one of {list(STUDY_IDS.keys())}.")
-        else:
-            window = (start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d"))
-            with st.spinner("Loading raw LFP data..."):
-                raw_df, file_map = load_raw(pt, window)
+    if mode == "Date range":
+        col1, col2 = st.columns(2)
+        start_date = col1.date_input("Start date")
+        end_date = col2.date_input("End date")
 
-            if raw_df is None or raw_df.empty:
-                st.error("No raw LFP data found in that window.")
+        if st.button("Load Data"):
+            if not validate_patient_id(pt):
+                st.error(f"Unrecognized patient ID prefix. Must start with one of {list(STUDY_IDS.keys())}.")
             else:
-                chs = [c for c in raw_df.columns if 'LEFT' in c or 'RIGHT' in c]
-                with st.spinner("Indexing data by hour..."):
-                    raw_hourly = group_by_hour(raw_df)
-                hours = sorted(raw_hourly)
+                window = (start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d"))
+                error = start_visit(pt, window)
+                if error:
+                    st.error(error)
+                else:
+                    st.rerun()
 
-                if not hours:
-                    st.error("No hourly data available to review.")
+    else:
+        st.caption("Runs every raw LFP file found under NBU/**/LFP/raw/*.parq for this patient "
+                   "through the pipeline, one visit after another.")
+        skip_existing = st.checkbox("Skip visits that already have a clean dataset", value=True)
+
+        if st.button("Start bulk preprocessing"):
+            if not validate_patient_id(pt):
+                st.error(f"Unrecognized patient ID prefix. Must start with one of {list(STUDY_IDS.keys())}.")
+            else:
+                with st.spinner("Searching for raw LFP files..."):
+                    visits, unmatched = find_raw_visits(pt)
+
+                if not visits and not unmatched:
+                    st.error("No raw LFP files found for this patient.")
                 else:
                     st.session_state.pt = pt
-                    st.session_state.window = window
-                    st.session_state.raw_hourly = raw_hourly
-                    st.session_state.file_map = file_map
-                    st.session_state.method_hours = {}
-                    st.session_state.stream_cache = {}
-                    st.session_state.chs = chs
-                    st.session_state.hours = hours
-                    st.session_state.hour_idx = 0
-                    st.session_state.hour_step = 'label'
-                    st.session_state.hour_selections = {}
-                    st.session_state.stage = 'hours'
+                    st.session_state.bulk_log = [
+                        {'visit': str(fp), 'status': "skipped: can't read visit window from filename"}
+                        for fp in unmatched
+                    ]
+                    queue = []
+                    for window, fp in visits:
+                        if skip_existing and clean_dataset_exists(pt, window):
+                            log_bulk(window, "skipped: clean dataset already exists")
+                        else:
+                            queue.append((window, fp))
+                    st.session_state.bulk_queue = queue
+                    st.session_state.bulk_idx = 0
+                    advance_bulk()
                     st.rerun()
 
 elif st.session_state.stage == 'hours':
-    hours = st.session_state.hours
-    idx = st.session_state.hour_idx
-    hour = hours[idx]
-    chs = st.session_state.chs
-    raw_hour_df = st.session_state.raw_hourly[hour]
-    prev = st.session_state.hour_selections.get(hour)
-    step = st.session_state.hour_step
+    # Everything on this page renders into one placeholder, so replacing it clears
+    # the last hour's plots and buttons while the review is being finalized.
+    hour_page = st.empty()
 
-    st.header("2. Review hourly data")
-    st.progress(idx / len(hours))
-    st.subheader(f"Hour {idx + 1} of {len(hours)}: {hour}")
+    if st.session_state.hour_idx >= len(st.session_state.hours):
+        with hour_page.container():
+            st.header("2. Review hourly data")
+            st.progress(1.0)
+            with st.status("All hours reviewed — preparing artifact review...", expanded=True) as status:
+                finish_hour_review()
+                status.update(label="Hour review complete", state="complete")
+        st.rerun()
 
-    hour_error = st.session_state.pop('hour_error', None)
-    if hour_error:
-        st.error(hour_error)
-    if prev:
-        st.caption(f"Previously marked: {describe_selection(prev)}")
+    with hour_page.container():
+        hours = st.session_state.hours
+        idx = st.session_state.hour_idx
+        hour = hours[idx]
+        chs = st.session_state.chs
+        raw_hour_df = st.session_state.raw_hourly[hour]
+        prev = st.session_state.hour_selections.get(hour)
+        step = st.session_state.hour_step
 
-    if step == 'label':
-        render_hour_plots({'raw': raw_hour_df}, chs, hour)
+        st.header("2. Review hourly data")
+        st.progress(idx / len(hours))
+        st.subheader(f"Hour {idx + 1} of {len(hours)}: {hour}")
 
-        st.write("Is the raw data for this hour clean?")
-        col1, col2, col3, col4 = st.columns(4)
-        if col1.button("Back", disabled=(idx == 0), key=f"back_label_{idx}"):
-            go_back_hour()
-            st.rerun()
-        if col2.button("Clean (keep raw)", key=f"clean_{idx}"):
-            select_hour('clean', 'raw')
-            st.rerun()
-        if col3.button("Unclean (compare ECG methods)", key=f"unclean_{idx}"):
-            st.session_state.hour_step = 'compare'
-            st.rerun()
-        if col4.button("Remove hour", key=f"remove_hour_{idx}"):
-            select_hour('removed', None)
-            st.rerun()
+        hour_error = st.session_state.pop('hour_error', None)
+        if hour_error:
+            st.error(hour_error)
+        if prev:
+            st.caption(f"Previously marked: {describe_selection(prev)}")
 
-    else:
-        if hour not in st.session_state.method_hours:
-            with st.spinner(f"Parsing this hour with {' / '.join(ALT_ECG_METHODS)} ECG cleaning..."):
-                st.session_state.method_hours[hour] = load_hour_methods(
-                    st.session_state.pt, hour, raw_hour_df, st.session_state.file_map, st.session_state.stream_cache
-                )
-        hour_dfs = {'raw': raw_hour_df, **st.session_state.method_hours[hour]}
+        if step == 'label':
+            render_hour_plots({'raw': raw_hour_df}, chs, hour)
 
-        missing = [m for m in ALT_ECG_METHODS if m not in hour_dfs]
-        if missing:
-            st.warning(f"No {' / '.join(missing)} data could be loaded for this hour.")
-
-        render_hour_plots(hour_dfs, chs, hour,
-                          seconds=COMPARE_SNIPPET_SECONDS, max_freq=COMPARE_PSD_MAX_FREQ)
-
-        radio_options = list(hour_dfs) + [REMOVE_HOUR]
-        if prev is None or prev['label'] == 'clean':
-            default = radio_options[0]
-        else:
-            default = prev['method'] or REMOVE_HOUR
-        selected = st.radio(
-            "Dataset to keep for this hour (applied to all channels)",
-            radio_options,
-            index=radio_options.index(default) if default in radio_options else 0,
-            format_func=lambda m: "Remove this hour (exclude from dataset)" if m == REMOVE_HOUR else m,
-            key=f"method_radio_{idx}",
-        )
-
-        col1, col2 = st.columns(2)
-        if col1.button("Back", key=f"back_compare_{idx}"):
-            go_back_hour()
-            st.rerun()
-        if col2.button("Next", key=f"next_{idx}"):
-            if selected == REMOVE_HOUR:
+            st.write("Is the raw data for this hour clean?")
+            col1, col2, col3, col4 = st.columns(4)
+            if col1.button("Back", disabled=(idx == 0), key=f"back_label_{idx}"):
+                go_back_hour()
+                st.rerun()
+            if col2.button("Clean (keep raw)", key=f"clean_{idx}"):
+                select_hour('clean', 'raw')
+                st.rerun()
+            if col3.button("Unclean (compare ECG methods)", key=f"unclean_{idx}"):
+                st.session_state.hour_step = 'compare'
+                st.rerun()
+            if col4.button("Remove hour", key=f"remove_hour_{idx}"):
                 select_hour('removed', None)
+                st.rerun()
+
+        else:
+            if hour not in st.session_state.method_hours:
+                with st.spinner(f"Parsing this hour with {' / '.join(ALT_ECG_METHODS)} ECG cleaning..."):
+                    st.session_state.method_hours[hour] = load_hour_methods(
+                        st.session_state.pt, hour, raw_hour_df, st.session_state.file_map, st.session_state.stream_cache
+                    )
+            hour_dfs = {'raw': raw_hour_df, **st.session_state.method_hours[hour]}
+
+            missing = [m for m in ALT_ECG_METHODS if m not in hour_dfs]
+            if missing:
+                st.warning(f"No {' / '.join(missing)} data could be loaded for this hour.")
+
+            render_hour_plots(hour_dfs, chs, hour,
+                              seconds=COMPARE_SNIPPET_SECONDS, max_freq=COMPARE_PSD_MAX_FREQ)
+
+            radio_options = list(hour_dfs) + [REMOVE_HOUR]
+            if prev is None or prev['label'] == 'clean':
+                default = radio_options[0]
             else:
-                select_hour('unclean', selected)
-            st.rerun()
+                default = prev['method'] or REMOVE_HOUR
+            selected = st.radio(
+                "Dataset to keep for this hour (applied to all channels)",
+                radio_options,
+                index=radio_options.index(default) if default in radio_options else 0,
+                format_func=lambda m: "Remove this hour (exclude from dataset)" if m == REMOVE_HOUR else m,
+                key=f"method_radio_{idx}",
+            )
+
+            col1, col2 = st.columns(2)
+            if col1.button("Back", key=f"back_compare_{idx}"):
+                go_back_hour()
+                st.rerun()
+            if col2.button("Next", key=f"next_{idx}"):
+                if selected == REMOVE_HOUR:
+                    select_hour('removed', None)
+                else:
+                    select_hour('unclean', selected)
+                st.rerun()
 
 elif st.session_state.stage == 'outliers':
     threshold = st.sidebar.slider(
@@ -442,6 +541,8 @@ elif st.session_state.stage == 'save':
                 fooof_pipeline.run_pipeline(parq_path, ch)
             progress_bar.progress((i + 1) / len(chs))
 
+        if st.session_state.bulk_queue:
+            log_bulk(st.session_state.window, "saved")
         st.session_state.stage = 'done'
         st.session_state.parq_path = parq_path
         st.session_state.meta_path = meta_path
@@ -456,3 +557,17 @@ elif st.session_state.stage == 'done':
     if st.session_state.get('marked_path'):
         st.write(f"Marked artifacts: `{st.session_state.marked_path}`")
     st.write(f"Feature files saved alongside the clean dataset as `spectra_fooof_bandpower_<channel>.pkl`.")
+
+    if st.session_state.bulk_queue:
+        remaining = len(st.session_state.bulk_queue) - st.session_state.bulk_idx
+        if st.button(f"Next visit ({remaining} remaining)" if remaining else "Finish bulk run"):
+            advance_bulk()
+            st.rerun()
+
+elif st.session_state.stage == 'bulk_done':
+    st.header("Bulk preprocessing complete")
+    st.write(f"Patient **{st.session_state.pt}**")
+    if st.session_state.bulk_log:
+        st.dataframe(pd.DataFrame(st.session_state.bulk_log), hide_index=True)
+    else:
+        st.write("No visits were found to process.")

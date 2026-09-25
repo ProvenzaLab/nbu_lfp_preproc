@@ -91,6 +91,14 @@ clean dataset ready for spectral analysis.
    **start/end dates**, then click **Load Data**. If the raw data hasn't
    been compiled yet, it's parsed from the raw session files and cached to
    the appropriate projectworlds folder.
+
+   To process every visit for a patient, choose **All visits (bulk)** instead
+   and click **Start bulk preprocessing**. This queues every raw file under
+   `projectworlds\<study id>\<patient>\NBU\**\LFP\raw\*.parq` (skipping
+   visits that already have a clean dataset, unless unchecked) and runs steps
+   2–5 for each visit in turn. Click **Next visit** after each save, or
+   **Skip this visit** in the sidebar. A table of per-visit outcomes is shown at
+   the end.
 2. For each available hour, check the raw PSDs and 30s snippet and click
    **Clean** (keep raw), **Unclean**, or **Remove hour**. **Unclean** parses
    that hour with the `template` and `perceive` ECG-cleaning methods (only the

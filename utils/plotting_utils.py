@@ -115,22 +115,21 @@ def plot_lfp_spectrogram(lfp_df, ch, fs, nperseg, max_freq, ax):
     cmap.set_bad(color='white')
 
     for start, end in valid_segments:
-        if end - start < nperseg:
-            continue
-
         lfp_values = lfp_df[ch].values[start:end]
-        times      = lfp_df['CT_times'].values[start:end]
+        t0 = mdates.date2num(lfp_df['CT_times'].values[start])
+
 
         f, t_bins, Sxx = spectrogram(lfp_values, fs, nperseg=nperseg, noverlap=nperseg//2)
         freq_mask = f <= max_freq
 
         Sxx_db = np.clip(10 * np.log10(Sxx[freq_mask]), -35, 0)
 
+        t_plot = t0 + t_bins / 86400.0
         ax.imshow(
             Sxx_db, aspect='auto', origin='lower',
-            extent=[times[0], times[-1],
+            extent=[t0, t_plot[-1],
                     f[freq_mask].min(), f[freq_mask].max()],
-            cmap=cmap, vmin=-35, vmax=0,  # fix color scale across segments
+            cmap=cmap
         )
 
     ax.set_title(f'LFP [{ch}]')

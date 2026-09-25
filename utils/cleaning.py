@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import numpy as np
 import pandas as pd
@@ -12,20 +13,42 @@ from utils.utils import find_non_nan_segments
 from utils.config import PROJECT_WORLDS, STUDY_IDS
 
 ALT_ECG_METHODS = ('template', 'perceive')  # ECG-cleaning methods parsed on demand for unclean hours
+RAW_FILE_RE = re.compile(r'(\d{4}-\d{2}-\d{2})-(\d{4}-\d{2}-\d{2})_timedomain_LFP\.parq$')
 
 
-def load_raw(pt, window):
+def find_raw_visits(pt):
+    """Find every compiled raw LFP parquet for a patient, i.e.
+    PROJECT_WORLDS / study_id / pt / 'NBU' / ** / 'LFP' / 'raw' / *.parq.
+
+    Returns (visits, unmatched): visits is a list of (window, path) sorted by
+    window, with the window read from the '<pt>_<start>-<end>_timedomain_LFP.parq'
+    filename; unmatched lists files whose name doesn't encode a window.
+    """
+    study_id = STUDY_IDS[pt[:-3]]
+    visits, unmatched = [], []
+    for fp in sorted((PROJECT_WORLDS / study_id / pt / 'NBU').glob('**/LFP/raw/*.parq')):
+        m = RAW_FILE_RE.search(fp.name)
+        if m:
+            visits.append((m.groups(), fp))
+        else:
+            unmatched.append(fp)
+    return sorted(visits), unmatched
+
+
+def load_raw(pt, window, fp=None):
     """Load the raw (non-ECG-cleaned) LFP data for a patient/visit window.
 
     Reads the compiled parquet if it already exists, otherwise parses the raw
-    session files (and caches the result to disk).
+    session files (and caches the result to disk). fp overrides the compiled
+    parquet's path (e.g. one found by find_raw_visits).
 
     Returns (raw_df, file_map); raw_df is None if there's no data. file_map maps
     (ipg_hemisphere, filename) -> session file path, used to re-parse an hour's
     files with the other ECG methods.
     """
-    study_id = STUDY_IDS[pt[:-3]]
-    fp = PROJECT_WORLDS / study_id / pt / 'NBU' / f'{window[0]}_{window[1]}' / 'LFP' / 'raw' / f'{pt}_{window[0]}-{window[1]}_timedomain_LFP.parq'
+    if fp is None:
+        study_id = STUDY_IDS[pt[:-3]]
+        fp = PROJECT_WORLDS / study_id / pt / 'NBU' / f'{window[0]}_{window[1]}' / 'LFP' / 'raw' / f'{pt}_{window[0]}-{window[1]}_timedomain_LFP.parq'
     if os.path.exists(fp):
         df = pd.read_parquet(fp)
     else:
@@ -268,10 +291,18 @@ def match_template(window, templates, max_lag=20):
     return best
 
 
+def clean_folder(pt, window):
+    study_id = STUDY_IDS[pt[:-3]]
+    return PROJECT_WORLDS / study_id / pt / 'NBU' / f'{window[0]}_{window[1]}' / 'LFP' / 'clean'
+
+
+def clean_dataset_exists(pt, window):
+    return os.path.exists(clean_folder(pt, window) / 'timedomain_LFP.parq')
+
+
 def save_clean_dataset(df, pt, window, hour_selections, removed_outliers):
     """Save the stitched, artifact-cleaned dataset + selection metadata to the 'clean' subfolder."""
-    study_id = STUDY_IDS[pt[:-3]]
-    target_folder = PROJECT_WORLDS / study_id / pt / 'NBU' / f'{window[0]}_{window[1]}' / 'LFP' / 'clean'
+    target_folder = clean_folder(pt, window)
     os.makedirs(target_folder, exist_ok=True)
 
     parq_path = target_folder / 'timedomain_LFP.parq'
@@ -313,8 +344,7 @@ def save_marked_artifacts(marked_artifacts, pt, window):
     if not marked_artifacts:
         return None
 
-    study_id = STUDY_IDS[pt[:-3]]
-    target_folder = PROJECT_WORLDS / study_id / pt / 'NBU' / f'{window[0]}_{window[1]}' / 'LFP' / 'clean'
+    target_folder = clean_folder(pt, window)
     os.makedirs(target_folder, exist_ok=True)
     marked_path = target_folder / 'marked_artifacts.json'
 
