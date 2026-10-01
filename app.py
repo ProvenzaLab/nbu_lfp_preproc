@@ -444,7 +444,7 @@ elif st.session_state.stage == 'outliers':
 
     idx = st.session_state.outlier_idx
 
-    st.header("3. Review candidate artifacts (>10 SD peaks)")
+    st.header("3. Review candidate artifacts (MAD peaks)")
 
     events_df = st.session_state.events_df
 

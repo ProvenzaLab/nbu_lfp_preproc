@@ -46,10 +46,13 @@ def get_events(pt, window):
 
     events_df = pd.concat([pd.read_csv(fp) for fp in fps], ignore_index=True)
     events_df.query('Event != "SESSION START" and Event != "SESSION END"', inplace=True)
-    events_df['start_dt'] = pd.to_datetime(
-        events_df['Start Date'].astype(str) + ' ' + events_df['Start Time'].astype(str)
-    ).dt.tz_localize(TZ)
-    events_df['end_dt'] = pd.to_datetime(
-        events_df['End Date'].astype(str) + ' ' + events_df['End Time'].astype(str)
-    ).dt.tz_localize(TZ)
+    try:
+        events_df['start_dt'] = pd.to_datetime(
+            events_df['Start Date'].astype(str) + ' ' + events_df['Start Time'].astype(str)
+        ).dt.tz_localize(TZ)
+        events_df['end_dt'] = pd.to_datetime(
+            events_df['End Date'].astype(str) + ' ' + events_df['End Time'].astype(str)
+        ).dt.tz_localize(TZ)
+    except Exception as e:
+        return pd.DataFrame()
     return events_df
