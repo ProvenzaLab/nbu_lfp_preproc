@@ -7,13 +7,17 @@ from typing import Any
 import pandas as pd
 
 
-FILE_PREFIX = "spectra_highres_fooof_bandpower_"
+FILE_PREFIX = "spectra_highres_spectra_"
 FILE_GLOB = "*/rawlfp/raw/spectra_highres_fooof_bandpower_*.pkl"
-BASE_DIR = Path("/mnt/labworlds/Provenza/NBUPipeline/TRBD002")  # TRBD001
-OUTPUT_DIR = Path("nbu_concat_single_channel_TRBD002")  # TRBD001
+BASE_DIR = Path("/mnt/projectworlds/TRBD-53761/TRBD001/NBU")  # TRBD001
+#/Volumes/projectworlds/TRBD-53761/TRBD001/NBU/2025-06-10_2025-06-11/LFP/clean/spectra_highres_spectra_ONE_THREE_LEFT.pkl
+OUTPUT_DIR = Path("nbu_concat_single_channel_TRBD001")  # TRBD001
 MAX_GAP_DAYS = 4
 PREFERRED_CONTACTS = ("ONE_THREE", "ZERO_TWO", "ZERO_THREE")
 VALID_SIDES = ("LEFT", "RIGHT")
+VISIT_SPLIT_START_DATE = pd.Timestamp("2025-06-03")
+VISIT_SPLIT_TIMESTAMP = pd.Timestamp("2025-06-04 22:56:14-05:00")
+VISIT_SPLIT_CUTOFF_DAY = VISIT_SPLIT_TIMESTAMP.tz_localize(None).normalize()
 
 
 @dataclass
@@ -257,7 +261,67 @@ def build_output_name(side: str, group: list[FileRecord], group_idx: int) -> str
     return f"{FILE_PREFIX}{merged_channel}_visit{group_idx:02d}_{start}_to_{end}.pkl"
 
 
+def build_output_name_with_suffix(
+    side: str,
+    group: list[FileRecord],
+    group_idx: int,
+    suffix: str,
+) -> str:
+    base_name = build_output_name(side, group, group_idx)
+    if not suffix:
+        return base_name
+    return f"{Path(base_name).stem}_{suffix}.pkl"
+
+
+def _align_split_timestamp(index: pd.DatetimeIndex, split_ts: pd.Timestamp) -> pd.Timestamp:
+    if index.tz is None and split_ts.tz is not None:
+        return split_ts.tz_localize(None)
+    if index.tz is not None and split_ts.tz is None:
+        return split_ts.tz_localize(index.tz)
+    if index.tz is not None and split_ts.tz is not None:
+        return split_ts.tz_convert(index.tz)
+    return split_ts
+
+
+def split_payload_by_timestamp(
+    payload: dict[str, Any],
+    split_ts: pd.Timestamp,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    before_payload: dict[str, Any] = {}
+    after_payload: dict[str, Any] = {}
+    before_has_rows = False
+    after_has_rows = False
+
+    for key, value in payload.items():
+        if isinstance(value, (pd.DataFrame, pd.Series)) and isinstance(value.index, pd.DatetimeIndex):
+            split_cmp = _align_split_timestamp(value.index, split_ts)
+            before_value = value.loc[value.index <= split_cmp]
+            after_value = value.loc[value.index > split_cmp]
+            before_payload[key] = before_value
+            after_payload[key] = after_value
+            before_has_rows = before_has_rows or not before_value.empty
+            after_has_rows = after_has_rows or not after_value.empty
+            continue
+
+        # Keep non-time-indexed data in both halves so metadata is preserved.
+        before_payload[key] = value
+        after_payload[key] = value
+
+    return (
+        before_payload if before_has_rows else None,
+        after_payload if after_has_rows else None,
+    )
+
+
 def main() -> None:
+    # open TRBD001_all_stim_params.parq
+    stim_params_df = pd.read_parquet("TRBD001_all_stim_params.parq")
+    # sort stim_params_df by "CT_times" in ascending order
+    stim_params_df = stim_params_df.sort_values(by="CT_times", ascending=True)
+    # get the first "CT_times" when right_suspend_amplitude is not 0 and not NaN
+    first_nonzero_ct_times = stim_params_df.query("right_suspend_amplitude != 0 and right_suspend_amplitude.notna()")["CT_times"].iloc[0]
+    print(f"First non-zero right_suspend_amplitude CT_times: {first_nonzero_ct_times}")
+    # 2025-06-04 22:56:14-05:00
     pkl_paths = sorted(BASE_DIR.glob(FILE_GLOB))
     if not pkl_paths:
         print(f"No files found with pattern {FILE_GLOB} under {BASE_DIR}")
@@ -296,6 +360,51 @@ def main() -> None:
                 for rec in group
                 for path in rec.source_paths
             ]
+
+            should_split_visit = group[0].date == VISIT_SPLIT_START_DATE
+
+            if should_split_visit:
+                before_payload, after_payload = split_payload_by_timestamp(
+                    merged_payload,
+                    VISIT_SPLIT_TIMESTAMP,
+                )
+
+                if before_payload is not None:
+                    before_name = build_output_name_with_suffix(
+                        side,
+                        group,
+                        group_idx,
+                        "before_split",
+                    )
+                    before_path = OUTPUT_DIR / before_name
+                    save_pickle(before_path, before_payload)
+                    total_written += 1
+                    print(
+                        f"Wrote {before_path} from {len(group)} files "
+                        f"(<= {VISIT_SPLIT_TIMESTAMP})"
+                    )
+
+                if after_payload is not None:
+                    after_name = build_output_name_with_suffix(
+                        side,
+                        group,
+                        group_idx,
+                        "after_split",
+                    )
+                    after_path = OUTPUT_DIR / after_name
+                    save_pickle(after_path, after_payload)
+                    total_written += 1
+                    print(
+                        f"Wrote {after_path} from {len(group)} files "
+                        f"(> {VISIT_SPLIT_TIMESTAMP})"
+                    )
+
+                if before_payload is None and after_payload is None:
+                    print(
+                        f"Skipped split output for visit {group_idx:02d} {side}: "
+                        "no time-indexed rows found around split timestamp"
+                    )
+                continue
 
             out_name = build_output_name(side, group, group_idx)
             out_path = OUTPUT_DIR / out_name

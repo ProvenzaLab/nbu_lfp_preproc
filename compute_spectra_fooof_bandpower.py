@@ -33,7 +33,7 @@ def compute_psd_windows(
     window_seconds=10,
     step_seconds=0.2,
     only_int_frequencies=True,
-    power_method="fft",
+    power_method="welch",
 ):
     window_samples = int(window_seconds * fs)
     step_samples = int(step_seconds * fs)
@@ -169,23 +169,29 @@ def add_active_sensing_band(df_bandpower, df_spec, center_freq, half_bandwidth):
     df_bandpower["active_sensing_band"] = sensing_values
     return df_bandpower
 
-def get_files_and_channels(folder_="perceive"):
+def get_files_and_channels():
 
-    path_check = f"NBU_file_path_date_mapping_{folder_}.csv"
+    path_check = f"/scratch/timonmerk/nbu_lfp_preproc/clean/NBU_file_path_date_mapping.csv"
     if os.path.exists(path_check):
         df_chs = pd.read_csv(path_check)
         return df_chs
 
-    PATH_DEFAULT = "/mnt/labworlds/Provenza/NBUPipeline"
+    # PATH_DEFAULT = "/mnt/labworlds/Provenza/NBUPipeline"
+    PATH_DEFAULT = "/mnt/projectworlds/TRBD-53761/"
+    columns_to_exclude = ["filename", "lead_location", "lead_model", "ipg_hemisphere", "start_time", "end_time", "left_frequency",
+                "right_frequency", "left_stim_cathode", "right_stim_cathode", "left_stim_anode", "right_stim_anode", "left_sensing_contacts",
+                "right_sensing_contacts", "left_pulse_width", "right_pulse_width", "left_suspend_amplitude", "right_suspend_amplitude", "left_lower_amplitude",
+                "right_lower_amplitude", "left_upper_amplitude", "right_upper_amplitude","CT_times"]
+    
     subjects = os.listdir(PATH_DEFAULT)
     l_chs_ = []
     for subject in subjects:
-        PATH_ = os.path.join(PATH_DEFAULT, subject)
+        PATH_ = os.path.join(PATH_DEFAULT, subject, "NBU")
         dates_ = os.listdir(PATH_)
         dates_ = [d for d in dates_ if os.path.isdir(os.path.join(PATH_, d))]
 
         for date in dates_:
-            path_read = os.path.join(PATH_, date, "rawlfp", folder_)
+            path_read = os.path.join(PATH_, date, "LFP", "clean")
             if not os.path.exists(path_read):
                 continue
 
@@ -194,7 +200,8 @@ def get_files_and_channels(folder_="perceive"):
                 continue
             files_parq = [f for f in files_parq if f.endswith(".parq")]
             df = pd.read_parquet(os.path.join(path_read, files_parq[0]))
-            channels = [ch for ch in list(df.columns) if ch not in ["filename", "CT_times", "lead_location", "lead_model", "ipg_hemisphere"]]
+            channels = [ch for ch in list(df.columns) if ch not in columns_to_exclude]
+            
             for ch in channels:
                 l_chs_.append({
                     "subject": subject,
@@ -203,51 +210,51 @@ def get_files_and_channels(folder_="perceive"):
                     "date": date,
                 })
     df_chs = pd.DataFrame(l_chs_)
-    df_chs.to_csv(f"NBU_file_path_date_mapping_{folder_}.csv", index=False)
+    df_chs.to_csv(os.path.join("/scratch/timonmerk/nbu_lfp_preproc/clean", f"NBU_file_path_date_mapping.csv"), index=False)
     return df_chs
     
 
 def run_pipeline(NBU_LFP_PATH, NBU_CHANNEL):
     ts, df_nbu = load_nbu_signal(NBU_LFP_PATH, NBU_CHANNEL)
-    #df_spec, freqs = compute_psd_windows(ts, df_nbu.index, fs=250, window_seconds=10, only_int_frequencies=False)
-    df_spec, freqs = compute_psd_windows(
-        ts,
-        df_nbu.index,
-        fs=250,
-        window_seconds=1,
-        step_seconds=0.2,
-        only_int_frequencies=False,
-        power_method="fft",
-    )
+    df_spec, freqs = compute_psd_windows(ts, df_nbu.index, fs=250, window_seconds=10, only_int_frequencies=False, step_seconds=10)
+    # df_spec, freqs = compute_psd_windows(
+    #     ts,
+    #     df_nbu.index,
+    #     fs=250,
+    #     window_seconds=1,
+    #     step_seconds=0.2,
+    #     only_int_frequencies=False,
+    #     power_method="fft",
+    # )
 
     #df_spec_1min = resample_spectrogram(df_spec, rule="1min")
 
-    df_aperiodic_params, df_aperiodic, df_periodic, df_spec_original = compute_fooof_decomposition(
-                df_spec,
-                freqs,
-                fit_range=(1, 100),
-                integer_hz=False,
-            )
+    # df_aperiodic_params, df_aperiodic, df_periodic, df_spec_original = compute_fooof_decomposition(
+    #             df_spec,
+    #             freqs,
+    #             fit_range=(1, 100),
+    #             integer_hz=False,
+    #         )
 
-    df_features = compute_bandpower(df_periodic, df_aperiodic_params, BANDS)
-    df_features = add_active_sensing_band(
-                df_features,
-                df_spec,
-                center_freq=8.79,
-                half_bandwidth=5,
-            )
+    # df_features = compute_bandpower(df_periodic, df_aperiodic_params, BANDS)
+    # df_features = add_active_sensing_band(
+    #             df_features,
+    #             df_spec,
+    #             center_freq=8.79,
+    #             half_bandwidth=5,
+    #         )
 
     d_save = {
         "df_spec": df_spec,
-        "df_features": df_features,
-        "df_aperiodic_params": df_aperiodic_params,
-        "df_aperiodic_spectra": df_aperiodic,
-        "df_periodic_ap_removed": df_periodic,
+        #"df_features": df_features,
+        #"df_aperiodic_params": df_aperiodic_params,
+        #"df_aperiodic_spectra": df_aperiodic,
+        #"df_periodic_ap_removed": df_periodic,
         "freqs": freqs
     }
     # save in same directory as input file
     save_dir = os.path.dirname(NBU_LFP_PATH)
-    save_path = os.path.join(save_dir, f"spectra_percept_fft_fooof_bandpower_{NBU_CHANNEL}.pkl")
+    save_path = os.path.join(save_dir, f"spectra_highres_spectra_{NBU_CHANNEL}.pkl")
 
     with open(save_path, "wb") as f:
         pickle.dump(d_save, f)
@@ -256,7 +263,7 @@ def run_pipeline(NBU_LFP_PATH, NBU_CHANNEL):
 
 if __name__ == "__main__":
 
-    l_ = get_files_and_channels("raw") # "perceive", "template"
+    l_ = get_files_and_channels() # "perceive", "template"
 
     # for idx, row in l_.iterrows():
     #     NBU_LFP_PATH = row["path"]
@@ -267,7 +274,7 @@ if __name__ == "__main__":
 
     run_pipeline(l_.iloc[run_idx]["path"], l_.iloc[run_idx]["channel"])
 
-    # Parallel(n_jobs=-1)(
+    # Parallel(n_jobs=len(l_))(
     #     delayed(run_pipeline)(row["path"], row["channel"])
     #     for idx, row in l_.iterrows()
     # )

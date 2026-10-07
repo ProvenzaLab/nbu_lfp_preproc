@@ -16,7 +16,10 @@ FALLBACK_SLEEP_START_HOUR = 20
 FALLBACK_SLEEP_END_HOUR = 8
 
 VISIT_FILE_RE = re.compile(
-    r"^spectra_highres_fooof_bandpower_(?P<channel>.+?)_visit(?P<visit>\d+)_(?P<start>\d{4}-\d{2}-\d{2})_to_(?P<end>\d{4}-\d{2}-\d{2})$"
+    r"^spectra_highres_fooof_bandpower_"
+    r"(?P<channel>.+?)_visit(?P<visit>\d+)_"
+    r"(?P<start>\d{4}-\d{2}-\d{2})_to_(?P<end>\d{4}-\d{2}-\d{2})"
+    r"(?:_(?P<split>before_split|after_split))?$"
 )
 
 
@@ -73,11 +76,13 @@ def _parse_visit_metadata(file_stem):
     channel = match.group("channel")
     side = channel.split("_")[-1] if "_" in channel else "UNKNOWN"
     visit_order = int(match.group("visit"))
+    split_label = match.group("split")
     return {
-        "visit_label": f"visit{visit_order:02d}",
+        "visit_label": f"visit{visit_order:02d}" + (f"_{split_label}" if split_label else ""),
         "visit_order": visit_order,
         "visit_start_date": pd.Timestamp(match.group("start")),
         "visit_end_date": pd.Timestamp(match.group("end")),
+        "visit_split": split_label,
         "side": side,
     }
 
@@ -380,7 +385,7 @@ def get_oura_scores(oura_scores, date_first, date_last, subject):
 
 oura = pd.read_pickle("oura_scores.pkl")
 
-base_dir = Path("nbu_concat_single_channel")
+base_dir = Path("nbu_concat_single_channel_TRBD001")
 pkl_files = sorted(base_dir.glob("spectra_highres_fooof_bandpower_*.pkl"))
 
 output_dir = Path("out_figures_concat_single_channel_tight")
@@ -396,6 +401,7 @@ sleep_dates = pd.Series(sleep_times_TRBD001["nbu_visit"].dt.date.unique())
 all_corr_records = []
 plot_payloads = []
 non_sleep_export_frames = []
+non_sleep_features_export_frames = []
 
 for pkl_file in pkl_files:
     with open(pkl_file, "rb") as f:
@@ -559,6 +565,32 @@ for pkl_file in pkl_files:
         export_df = export_df.rename(columns=lambda c: f"spectrum_{c}" if isinstance(c, (int, float, np.number)) else c)
         non_sleep_export_frames.append(export_df.reset_index(drop=True))
 
+    features_overlap_mask = _build_interval_overlap_mask(
+        df_features.index,
+        export_excluded_intervals,
+    )
+    df_features_no_sleep = df_features.loc[~features_overlap_mask].copy()
+    if not df_features_no_sleep.empty:
+        visit_start_date = visit_meta.get("visit_start_date", pd.NaT)
+        visit_date_str = ""
+        if pd.notna(visit_start_date):
+            visit_date_str = pd.Timestamp(visit_start_date).strftime("%Y-%m-%d")
+
+        features_export_df = df_features_no_sleep.copy()
+        if len(source_channel_series) > 0:
+            source_channel_no_sleep = source_channel_series.reindex(
+                features_export_df.index,
+                method="ffill",
+            )
+            features_export_df.insert(0, "source_channel", source_channel_no_sleep.to_numpy())
+
+        features_export_df.insert(0, "exact_datetime", features_export_df.index)
+        features_export_df.insert(0, "nbu_visit_date", visit_date_str)
+        features_export_df.insert(0, "visit_label", visit_meta.get("visit_label", "visit_unknown"))
+        features_export_df.insert(0, "side", visit_meta.get("side", "UNKNOWN"))
+        features_export_df.insert(0, "file_name", pkl_file.name)
+        non_sleep_features_export_frames.append(features_export_df.reset_index(drop=True))
+
     plot_payloads.append(
         {
             "file_name": pkl_file.name,
@@ -712,7 +744,16 @@ non_sleep_pkl = output_dir / "non_sleep_10s_spectra_with_active_sensing.pkl"
 non_sleep_out.to_csv(non_sleep_csv, index=False)
 non_sleep_out.to_pickle(non_sleep_pkl)
 
+non_sleep_features_out = (
+    pd.concat(non_sleep_features_export_frames, ignore_index=True)
+    if non_sleep_features_export_frames
+    else pd.DataFrame()
+)
+non_sleep_features_pkl = output_dir / "non_sleep_10s_df_features.pkl"
+non_sleep_features_out.to_pickle(non_sleep_features_pkl)
+
 print(f"Saved correlations to: {corr_csv}")
 print(f"Saved correlations to: {corr_pkl}")
 print(f"Saved non-sleep spectra dataframe to: {non_sleep_csv}")
 print(f"Saved non-sleep spectra dataframe to: {non_sleep_pkl}")
+print(f"Saved non-sleep df_features dataframe to: {non_sleep_features_pkl}")

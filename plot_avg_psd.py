@@ -19,9 +19,8 @@ INDIVIDUAL_LINEWIDTH = 0.12
 INDIVIDUAL_ALPHA = 0.04
 # Thick trace for per-visit average spectrum.
 AVERAGE_LINEWIDTH = 2.6
-SEM_BAND_ALPHA = 0.2
 
-# If True, plot only mean +/- 1 SEM per visit (no individual 10s traces).
+# If True, plot only mean per visit (no individual 10s traces).
 PLOT_MEAN_PM_STD_ONLY = True
 
 # Color coding scheme: either "madrs" or "time"
@@ -54,6 +53,12 @@ def _load_non_sleep_dataframe() -> pd.DataFrame:
         else:
             df["nbu_visit_date"] = "visit_unknown"
 
+    if "visit_label" not in df.columns:
+        if "nbu_visit_date" in df.columns:
+            df["visit_label"] = df["nbu_visit_date"].astype(str)
+        else:
+            df["visit_label"] = "visit_unknown"
+
     if "side" not in df.columns:
         df["side"] = "ALL"
 
@@ -83,10 +88,10 @@ def _extract_spectrum_columns(df: pd.DataFrame) -> tuple[list[str], np.ndarray]:
     return sorted_cols, sorted_freqs
 
 
-def _sorted_visits(df: pd.DataFrame) -> list[str]:
+def _sorted_visits(df: pd.DataFrame, visit_col: str) -> list[str]:
     if "exact_datetime" in df.columns and df["exact_datetime"].notna().any():
         visit_order = (
-            df.groupby("nbu_visit_date")["exact_datetime"]
+            df.groupby(visit_col)["exact_datetime"]
             .min()
             .sort_values()
             .index.astype(str)
@@ -94,10 +99,14 @@ def _sorted_visits(df: pd.DataFrame) -> list[str]:
         )
         return visit_order
 
-    return sorted(df["nbu_visit_date"].astype(str).unique().tolist())
+    return sorted(df[visit_col].astype(str).unique().tolist())
 
 
-def _visit_time_since_first(df: pd.DataFrame, visits: list[str]) -> dict[str, float]:
+def _visit_time_since_first(
+    df: pd.DataFrame,
+    visits: list[str],
+    visit_col: str,
+) -> dict[str, float]:
     """Calculate days since first visit for each visit."""
     time_map: dict[str, float] = {}
     
@@ -105,7 +114,7 @@ def _visit_time_since_first(df: pd.DataFrame, visits: list[str]) -> dict[str, fl
         # Use exact datetime if available
         visit_datetimes = {}
         for visit in visits:
-            visit_df = df[df["nbu_visit_date"] == visit]
+            visit_df = df[df[visit_col] == visit]
             if not visit_df.empty:
                 visit_datetimes[visit] = visit_df["exact_datetime"].min()
         
@@ -126,26 +135,32 @@ def _visit_time_since_first(df: pd.DataFrame, visits: list[str]) -> dict[str, fl
 
 
 def _time_colors(visits: list[str], time_map: dict[str, float]) -> dict[str, tuple[float, float, float, float]]:
-    """Generate colors based on time-since-first-visit."""
-    cmap = plt.get_cmap("viridis")
-    known_times = [t for t in time_map.values() if np.isfinite(t)]
-    
-    if known_times:
-        vmin = min(known_times)
-        vmax = max(known_times)
-        if vmin == vmax:
-            vmax = vmin + 1.0
-        norm = mpl.colors.Normalize(vmin=vmin, vmax=vmax)
-        return {
-            visit: cmap(norm(time_map[visit])) if np.isfinite(time_map[visit]) else (0.55, 0.55, 0.55, 1.0)
-            for visit in visits
-        }
-    
-    # Fallback: deterministic viridis ramp by visit order
-    return {
-        visit: cmap(i / max(len(visits) - 1, 1))
-        for i, visit in enumerate(visits)
+    """Generate unique colors for each visit while preserving time order."""
+    cmap = plt.get_cmap("turbo")
+    if not visits:
+        return {}
+
+    # Sort by time (then label) so the color ramp still follows progression in time.
+    ordered_visits = sorted(
+        visits,
+        key=lambda v: (
+            time_map.get(v, np.inf) if np.isfinite(time_map.get(v, np.nan)) else np.inf,
+            str(v),
+        ),
+    )
+
+    # Sample evenly across the colormap to guarantee distinct colors per visit.
+    if len(ordered_visits) == 1:
+        positions = [0.5]
+    else:
+        positions = np.linspace(0.05, 0.95, len(ordered_visits))
+
+    colors = {
+        visit: cmap(float(pos))
+        for visit, pos in zip(ordered_visits, positions)
     }
+
+    return {visit: colors[visit] for visit in visits}
 
 
 def _load_madrs_by_date_from_csv(csv_path: Path) -> dict[str, float]:
@@ -211,10 +226,13 @@ def main() -> None:
     df = df.copy()
     df[spec_cols] = df[spec_cols].apply(pd.to_numeric, errors="coerce")
     df["nbu_visit_date"] = df["nbu_visit_date"].astype(str)
+    df["visit_label"] = df["visit_label"].astype(str)
     df["side"] = df["side"].astype(str)
 
     sides = sorted(df["side"].dropna().unique().tolist())
-    visits = _sorted_visits(df)
+    visit_col = "visit_label" if COLOR_BY.lower() == "time" else "nbu_visit_date"
+    visits = _sorted_visits(df, visit_col=visit_col)
+    # set the 
     if not visits:
         raise ValueError("No visit groups found in dataframe.")
 
@@ -225,7 +243,7 @@ def main() -> None:
         visit_colors = _madrs_colors(visits, visit_madrs)
         color_values = visit_madrs
     else:  # default to "time"
-        visit_times = _visit_time_since_first(df, visits)
+        visit_times = _visit_time_since_first(df, visits, visit_col=visit_col)
         visit_colors = _time_colors(visits, visit_times)
         color_values = visit_times
     fig, axes = plt.subplots(
@@ -243,7 +261,7 @@ def main() -> None:
         side_df = df[df["side"] == side]
 
         for visit in visits:
-            visit_df = side_df[side_df["nbu_visit_date"] == visit]
+            visit_df = side_df[side_df[visit_col] == visit]
             if visit_df.empty:
                 continue
 
@@ -265,22 +283,6 @@ def main() -> None:
 
             avg = np.nanmean(y_log, axis=0) # manmean
             avg_psd_data[f"{side}_{visit}"] = avg
-            n_valid = np.sum(~np.isnan(y_log), axis=0)
-            std = np.nanstd(y_log, axis=0)
-            sem = np.divide(
-                std,
-                np.sqrt(n_valid),
-                out=np.full_like(std, np.nan),
-                where=n_valid > 0,
-            )
-            ax.fill_between(
-                freqs,
-                avg - std,
-                avg + std,
-                color=color,
-                alpha=SEM_BAND_ALPHA,
-                linewidth=0,
-            )
             if COLOR_BY.lower() == "madrs":
                 label_text = (
                     f"{visit} | MADRS={color_values[visit]:.1f} (n={len(visit_df)})"
@@ -317,7 +319,7 @@ def main() -> None:
     axes[-1, 0].set_xlabel("Frequency (Hz)")
     if PLOT_MEAN_PM_STD_ONLY:
         color_label = "MADRS" if COLOR_BY.lower() == "madrs" else "time-since-first-visit"
-        fig.suptitle(f"Non-sleep PSD by visit date, color-coded by {color_label}: mean +/- 1 SEM")
+        fig.suptitle(f"Non-sleep PSD by visit date, color-coded by {color_label}: mean only")
     else:
         color_label = "MADRS" if COLOR_BY.lower() == "madrs" else "time-since-first-visit"
         fig.suptitle(f"Non-sleep PSD by visit date, color-coded by {color_label}")

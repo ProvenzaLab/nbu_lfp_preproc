@@ -11,3 +11,6 @@ nbu_concat/*
 *.out
 *.log
 logs/*
+
+*.parq
+*.pptx
